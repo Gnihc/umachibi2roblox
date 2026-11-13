@@ -65,10 +65,13 @@ def main():
     assert len(P) == 4 * 19
     pivot = np.array(face["Mouth"]["pivot"]); axis = np.array(face["Mouth"]["axis"]); inside = np.array(face["Mouth"]["inside"])
     R180 = 2 * np.outer(axis, axis) - np.eye(3)
-    assert np.allclose(P[4:8].mean(0), inside, atol=1e-4)                     # variant 1 rests inside the head
-    assert np.allclose((P[4:8] - pivot) @ R180.T + pivot, P[0:4], atol=1e-5)  # a 180 turn brings it onto the face
+    assert face["Mouth"]["default"] == 1 and face["Eye_L"]["default"] == 0
+    assert np.allclose(P[0:4].mean(0), inside, atol=1e-4)                     # sprite 0 rests inside the head
+    assert np.allclose((P[0:4] - pivot) @ R180.T + pivot, P[4:8], atol=1e-5)  # a 180 turn brings it onto the face
+    assert np.allclose(P[8:12].mean(0), inside, atol=1e-4)                    # sprite 2 too
+    assert not np.allclose(P[4:8].mean(0), inside, atol=1e-3)                 # sprite 1 (default) on the face
     assert np.allclose(UV[5 * 4:6 * 4] - UV[0:4], [0.25, 0.125], atol=1e-6)  # variant 5 = column 1, row 1
-    assert inside[2] < P[0:4, 2].mean()                                       # inside = behind the face (+Z front)
+    assert inside[2] < P[4:8, 2].mean()                                       # inside = behind the face (+Z front)
     bone_node = j["nodes"][names.index("Face_Mouth_05")]
     head_world = next(b["world"] for b in meta["skeleton"] if b["name"] == "Head")
     assert np.allclose(np.array(head_world) + bone_node["translation"], pivot, atol=1e-5)  # bone sits at the pivot
@@ -88,13 +91,16 @@ def main():
         a, lg, _ = run(kind)
         by = {bb["name"]: bb for bb in a["bones"]}
         fb = sorted(n for n in by if n.startswith("Face_"))
-        assert fb == ["Face_Mouth_00", "Face_Mouth_05"], (kind, fb)      # the 1-frame blip (2) is dropped
-        q0 = np.array(by["Face_Mouth_00"]["rot"]).reshape(-1, 4); q5 = np.array(by["Face_Mouth_05"]["rot"]).reshape(-1, 4)
-        ident = lambda q: np.allclose(np.abs(q[:, 3]), 1, atol=1e-5)
-        turn = lambda q: np.allclose(np.abs(q[:, :3] @ axis), 1, atol=1e-5) and np.allclose(q[:, 3], 0, atol=1e-5)
-        assert ident(q0[:14]) and ident(q5[:14])                          # rest expression first
-        assert turn(q0[-1:]) and turn(q5[-1:])                            # then 5 turned out, 0 turned in
-        assert "dpos" not in by["Face_Mouth_05"] and by["Face_Mouth_05"]["constant"] is True   # no translation
+        assert fb == [f"Face_Mouth_{k:02d}" for k in range(19)], (kind, fb)   # every variant keyed (no fall-through)
+        q = {k: np.array(by[f"Face_Mouth_{k:02d}"]["rot"]).reshape(-1, 4) for k in range(19)}
+        ident = lambda x: np.allclose(np.abs(x[:, 3]), 1, atol=1e-5)
+        turn = lambda x: np.allclose(np.abs(x[:, :3] @ axis), 1, atol=1e-5) and np.allclose(x[:, 3], 0, atol=1e-5)
+        # first half: locator says sprite 0 -> sprite 0 turned out, default sprite 1 turned in, the rest untouched
+        assert turn(q[0][:14]) and turn(q[1][:14]) and ident(q[5][:14]) and ident(q[2][:14])
+        # then sprite 5 (the 1-frame blip to 2 is dropped): 5 out, 1 still in, 0 back in, 2 never shown
+        assert turn(q[5][-1:]) and turn(q[1][-1:]) and ident(q[0][-1:]) and ident(q[2])
+        assert all("dpos" not in by[f"Face_Mouth_{k:02d}"] for k in range(19)) and by["Face_Mouth_05"]["constant"] is True
+        q5 = q[5]
         print(f"face animation ok ({kind}): swap at frame", int(np.argmax(np.abs(q5[:, 3]) < 0.5)), "of", a["frames"])
 
     a, lg, w = run("unknown")

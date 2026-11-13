@@ -455,6 +455,10 @@ FACE_PARTS = {          # part -> (frames, row step)
 }
 
 
+# sprite shown at rest (no animation): the mouth's second sprite (small smile), first sprite elsewhere
+FACE_DEFAULT = {"Mouth": 1}
+
+
 def face_bone_name(part: str, k: int) -> str:
     return f"Face_{part}_{k:02d}"
 
@@ -511,6 +515,7 @@ def _build_face_variants(prims, bone_pos, model, head, warnings):
     new_bones, face_meta = [], {}
     for part, items in groups.items():
         frames, rstep = FACE_PARTS[part]
+        default = min(FACE_DEFAULT.get(part, 0), frames - 1)
         mat = items[0][0].material
         pos_l, nrm_l, uv_l, j_l, w_l, f_l = [], [], [], [], [], []
         base_v = 0
@@ -534,7 +539,7 @@ def _build_face_variants(prims, bone_pos, model, head, warnings):
             du, dv = 0.25 * (k % 4), rstep * (k // 4)
             for p, f in items:
                 used, inv = np.unique(f.reshape(-1), return_inverse=True)
-                if k == 0:
+                if k == default:
                     pos, nrm = p.pos[used], p.nrm[used]
                 else:   # hidden at rest: turned 180 degrees about the pivot, into the head
                     pos = (p.pos[used] - pivot) @ R180.T + pivot
@@ -551,7 +556,7 @@ def _build_face_variants(prims, bone_pos, model, head, warnings):
                     faces=np.concatenate(f_l).astype(np.int32), material=mat, alpha=items[0][0].alpha)
         out.append(np_)
         face_meta[part] = {"bones": [face_bone_name(part, k) for k in range(frames)], "frames": frames,
-                           "rowStep": rstep, "pivot": [float(x) for x in pivot], "axis": [float(x) for x in axis],
+                           "rowStep": rstep, "default": default, "pivot": [float(x) for x in pivot], "axis": [float(x) for x in axis],
                            "inside": [float(x) for x in inside]}
     for name, p in new_bones:
         model.bones.append(Bone(name, name, np.zeros(3, np.float32), head))

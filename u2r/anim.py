@@ -458,19 +458,22 @@ def face_frames(clip: Clip, skel: Skeleton, face_meta: dict, times: np.ndarray):
 
 def face_tracks(frames: dict, face_meta: dict, head_rot: list | None, n: int) -> list:
     """Constant-key bone tracks that swap expressions with a 180 degree turn (no translation, so model
-    scale never affects it): the shown variant turns out of the head, variant 0 turns in when not shown.
-    World delta of a variant bone = head delta * (180 degree turn about the part's axis, when toggled)."""
+    scale never affects it). The default variant rests on the face and turns in when another is shown; the
+    others rest inside and turn out when shown. World delta = head delta * (180 degree turn when toggled).
+
+    Every variant of a part is keyed, not only the ones that change: clips play as separate tracks
+    (_s / _loop / _e at different priorities) and a joint a track doesn't key falls through to the other
+    track, which left an old expression showing on top of the new one."""
     H = np.array(head_rot if head_rot is not None else [0.0, 0.0, 0.0, 1.0] * n, np.float64).reshape(-1, 4)
     bones = []
     for part, fr in frames.items():
         meta = face_meta[part]
+        default = int(meta.get("default", 0))
         a = np.array(meta["axis"], np.float64)
         Q = np.array([a[0], a[1], a[2], 0.0])          # 180 degrees about a
         turned = qmul(H, np.broadcast_to(Q, H.shape))
         for k, name in enumerate(meta["bones"]):
-            toggled = (fr != 0) if k == 0 else (fr == k)
-            if not toggled.any():
-                continue
+            toggled = (fr != default) if k == default else (fr == k)
             q = np.where(toggled[:, None], turned, H)
             for t in range(1, len(q)):                     # keep quaternion signs continuous
                 if np.dot(q[t], q[t - 1]) < 0:

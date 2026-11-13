@@ -58,7 +58,9 @@ every conversion:
   the converter turns each face part (left/right eye, mouth, left/right mayu) into one mesh holding every
   expression of the atlas: eyes 15, mouth 19, mayu 9. Each variant is a copy with its UVs shifted to its atlas
   cell and its own bone `Face_<part>_<nn>` under `Head`, placed halfway between the part on the face and a point
-  inside the head. Variant 0 rests on the face; the others rest turned 180° into the head. Each body clip's
+  inside the head. The default sprite rests on the face (mouth: its second sprite, the small smile; eyes and mayu:
+  their first); the others rest turned 180° into the head. Every variant of a part is keyed in each clip, so when
+  `_s`/`_loop`/`_e` play as separate tracks, the active one fully owns the face and no old expression shows through. Each body clip's
   `…/facial/…/<clip>_face` track becomes **Constant** keys that turn the shown variant out and the previous one in.
   It's a pure rotation, so it's unaffected by `Model:ScaleTo` (Roblox scales animation translations, never
   rotations). Expressions swap instantly through the normal Animator and preview in the Animation Editor. Keys are only written when an expression changes. The `_face` clips drive locators
