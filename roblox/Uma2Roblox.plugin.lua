@@ -343,7 +343,22 @@ local function buildSequence(anim, fit, bonesByName, order, modelScale)
 	-- <x>_s (start) and <x>_e (end) are one-shot Action tracks; <x>_loop is a looping Idle track
 	ks.Priority = anim.loop and Enum.AnimationPriority.Idle or Enum.AnimationPriority.Action
 	local R, Rinv = fit.R, fit.R:Inverse()
-	local lastLocal = {} -- constant (face) bones: only key frames where they change
+	-- Constant (face) bones are keyed only around changes. Roblox does not hold a Constant pose until the next
+	-- key: across the gap it already shows the NEXT key's value. So every change also gets a key on the frame
+	-- before it, holding the old value; otherwise a sprite turns out (or in) as soon as the previous key
+	-- passes, and several expressions show at once.
+	local lastLocal = {} -- constant bones: value of their last key
+	local keyedAt = {} -- constant bones: frame of their last key
+	local prevPoseOf -- previous frame's bone -> Pose
+	local function newPose(bone, localCf, constant)
+		local pose = Instance.new("Pose")
+		pose.Name = bone.Name
+		pose.CFrame = CFrame.new(localCf.Position / modelScale) * localCf.Rotation
+		if constant then
+			pose.EasingStyle = Enum.PoseEasingStyle.Constant
+		end
+		return pose
+	end
 	for f = 0, anim.frames - 1 do
 		local kf = Instance.new("Keyframe")
 		kf.Time = f / anim.fps
@@ -389,22 +404,25 @@ local function buildSequence(anim, fit, bonesByName, order, modelScale)
 			if d and d.constant then
 				-- face expression bones: instant 180-degree swaps (Constant easing), no key while nothing changes
 				local prev = lastLocal[bone]
-				skip = prev ~= nil
-					and f < anim.frames - 1
+				local same = prev ~= nil
 					and (prev.Position - localCf.Position).Magnitude < 1e-4
 					and prev.LookVector:Dot(localCf.LookVector) > 0.9999
 					and prev.UpVector:Dot(localCf.UpVector) > 0.9999
+				skip = same and f < anim.frames - 1
+				if prev ~= nil and not same and needed[bone] and keyedAt[bone] ~= f - 1 then
+					-- hold the old value up to the frame before the change (see above)
+					local holdParent = prevPoseOf and prevPoseOf[parent]
+					if holdParent then
+						newPose(bone, prev, true).Parent = holdParent
+					end
+				end
 				if not skip then
 					lastLocal[bone] = localCf
+					keyedAt[bone] = f
 				end
 			end
 			if needed[bone] and not skip then
-				local pose = Instance.new("Pose")
-				pose.Name = bone.Name
-				pose.CFrame = CFrame.new(localCf.Position / modelScale) * localCf.Rotation
-				if d and d.constant then
-					pose.EasingStyle = Enum.PoseEasingStyle.Constant
-				end
+				local pose = newPose(bone, localCf, d and d.constant)
 				local parentPose = poseOf[parent]
 				if not parentPose then
 					parentPose = partPoses[parent]
@@ -420,6 +438,7 @@ local function buildSequence(anim, fit, bonesByName, order, modelScale)
 			end
 		end
 		kf.Parent = ks
+		prevPoseOf = poseOf
 		if f % 8 == 7 then
 			task.wait()
 		end
@@ -435,13 +454,27 @@ local function animSaveFolder(model)
 		saves.Name = "RBX_ANIMSAVES"
 		saves.Parent = ServerStorage
 	end
-	local holder = saves:FindFirstChild(model.Name)
-	if not holder then
-		holder = Instance.new("ObjectValue")
-		holder.Name = model.Name
-		holder.Value = model
-		holder.Parent = saves
+	-- The Animation Editor ties a save folder to its rig through the ObjectValue's Value, not its name:
+	-- copies of a rig share a name, so match on Value (the rig actually selected), never the first name match.
+	local orphan
+	for _, child in ipairs(saves:GetChildren()) do
+		if child:IsA("ObjectValue") then
+			if child.Value == model then
+				return child
+			end
+			if not orphan and child.Value == nil and child.Name == model.Name then
+				orphan = child -- same-named folder whose rig was deleted: adopt it rather than add another
+			end
+		end
 	end
+	if orphan then
+		orphan.Value = model
+		return orphan
+	end
+	local holder = Instance.new("ObjectValue")
+	holder.Name = model.Name
+	holder.Value = model
+	holder.Parent = saves
 	return holder
 end
 
