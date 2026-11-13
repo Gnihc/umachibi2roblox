@@ -312,6 +312,31 @@ local function boneOrder(list)
 	return list
 end
 
+-- Face expression keys are 180-degree turns. At exactly 180 degrees the rotation axis is ill-conditioned: the
+-- Animator reads float noise in the pose (~1e-8) as the axis and plays a 180-degree turn about a wrong axis
+-- (measured 39 degrees off), so the swapped-in sprite lands tilted into the face. Rebuild such turns from a
+-- clean axis with an angle just under 180 degrees (0.06 degrees short: far below anything visible).
+local TURN_MARGIN = 1e-3
+local function wellConditionedTurn(rot)
+	local _, _, _, r00, r01, r02, r10, r11, r12, r20, r21, r22 = rot:GetComponents()
+	local cosA = math.clamp((r00 + r11 + r22 - 1) / 2, -1, 1)
+	if cosA > math.cos(math.pi - 0.01) then
+		return rot -- not near 180 degrees: well conditioned as it is
+	end
+	-- for a turn of ~180 degrees, R + I = 2 a a^T: its longest column points along the axis a
+	local best
+	for _, col in ipairs({
+		Vector3.new(r00 + 1, r10, r20),
+		Vector3.new(r01, r11 + 1, r21),
+		Vector3.new(r02, r12, r22 + 1),
+	}) do
+		if not best or col.Magnitude > best.Magnitude then
+			best = col
+		end
+	end
+	return CFrame.fromAxisAngle(best.Unit, math.pi - TURN_MARGIN)
+end
+
 -- Roblox's Animator multiplies pose translations by the model's scale (Model:ScaleTo / GetScale), so poses
 -- must hold *unscaled* offsets. Dividing by the scale at build time makes the same KeyframeSequence correct
 -- at any model scale, including if the model is rescaled later.
@@ -353,7 +378,11 @@ local function buildSequence(anim, fit, bonesByName, order, modelScale)
 	local function newPose(bone, localCf, constant)
 		local pose = Instance.new("Pose")
 		pose.Name = bone.Name
-		pose.CFrame = CFrame.new(localCf.Position / modelScale) * localCf.Rotation
+		local rot = localCf.Rotation
+		if constant then
+			rot = wellConditionedTurn(rot)
+		end
+		pose.CFrame = CFrame.new(localCf.Position / modelScale) * rot
 		if constant then
 			pose.EasingStyle = Enum.PoseEasingStyle.Constant
 		end
