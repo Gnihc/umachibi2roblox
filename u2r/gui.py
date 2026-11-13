@@ -146,6 +146,7 @@ class OptionsDialog(tk.Toplevel):
             "port_animations": tk.BooleanVar(value=o.port_animations),
             "general_animations": tk.BooleanVar(value=o.general_animations),
             "anim_fps": tk.DoubleVar(value=o.anim_fps),
+            "root_motion": tk.StringVar(value=o.root_motion),
             "outline_exclude": tk.StringVar(value=o.outline_exclude),
             "cel_exclude": tk.StringVar(value=o.cel_exclude),
         }
@@ -176,6 +177,7 @@ class OptionsDialog(tk.Toplevel):
         row("Port mini animations", ttk.Checkbutton(f, variable=self.v["port_animations"]))
         row("  …include General mini animations", ttk.Checkbutton(f, variable=self.v["general_animations"]))
         row("  Animation keyframes per second", ttk.Combobox(f, textvariable=self.v["anim_fps"], values=[10, 15, 20, 30], width=10))
+        row("  Root motion (inplace = stay in place)", ttk.Combobox(f, textvariable=self.v["root_motion"], values=["inplace", "full", "none"], state="readonly", width=10))
         b = ttk.Frame(f)
         b.grid(row=r, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(b, text="Defaults", command=self.defaults).pack(side="left", padx=4)
@@ -209,6 +211,7 @@ class OptionsDialog(tk.Toplevel):
                 "port_animations": self.v["port_animations"].get(),
                 "general_animations": self.v["general_animations"].get(),
                 "anim_fps": float(self.v["anim_fps"].get()),
+                "root_motion": self.v["root_motion"].get(),
                 "outline_exclude": self.v["outline_exclude"].get(),
                 "cel_exclude": self.v["cel_exclude"].get(),
             }
@@ -513,7 +516,7 @@ class App:
         try:
             self.post("log", f"Porting mini animations for {os.path.basename(meta_path)[:-5]} …")
             port_character_animations(self.gamedata(), meta_path, o.general_animations, o.anim_fps,
-                                      log=lambda m: self.post("log", m))
+                                      log=lambda m: self.post("log", m), root_motion=o.root_motion)
         except Exception as ex:
             self.post("log", f"Animations skipped: {ex}")
 

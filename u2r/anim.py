@@ -254,12 +254,16 @@ class Pose:
     L: np.ndarray        # (T,B,3,3) world linear part (rotation * scale)
     X: np.ndarray        # (T,B,3)   world position
     lpos: np.ndarray     # (T,B,3)   local position
+    lrot: np.ndarray     # (T,B,4)   local rotation
+    lscl: np.ndarray     # (T,B,3)   local scale
     animated: np.ndarray     # (B,) bone has any curve
     pos_animated: np.ndarray  # (B,) bone has a position curve
 
 
-def fk(skel: Skeleton, clip: Clip | None, times: np.ndarray) -> Pose:
-    """World transforms in Unity space, relative to the animator root (scale included)."""
+def fk(skel: Skeleton, clip: Clip | None, times: np.ndarray, hold: dict | None = None) -> Pose:
+    """World transforms in Unity space, relative to the animator root (scale included).
+    hold: {bone index: (pos, rot, scl)} keeps those bones' local transform fixed, ignoring their curves."""
+    hold = hold or {}
     T, B = len(times), len(skel.names)
     lrot = np.broadcast_to(skel.rest_rot, (T, B, 4)).copy()
     lpos = np.broadcast_to(skel.rest_pos, (T, B, 3)).copy()
@@ -269,7 +273,7 @@ def fk(skel: Skeleton, clip: Clip | None, times: np.ndarray) -> Pose:
     if clip:
         for (h, attr), f in clip.tracks.items():
             bi = skel.by_hash.get(h)
-            if bi is None:
+            if bi is None or bi in hold:
                 continue
             v = f(times)
             if attr == 2:
@@ -282,6 +286,8 @@ def fk(skel: Skeleton, clip: Clip | None, times: np.ndarray) -> Pose:
             elif attr == 3:
                 lscl[:, bi] = v
             animated[bi] = True
+    for bi, (hp, hr, hs) in hold.items():
+        lpos[:, bi], lrot[:, bi], lscl[:, bi] = hp, hr, hs
     local_lin = quat_to_mat(lrot) * lscl[:, :, None, :]       # R * diag(s)
     L = np.zeros((T, B, 3, 3))
     X = np.zeros((T, B, 3))
@@ -294,7 +300,7 @@ def fk(skel: Skeleton, clip: Clip | None, times: np.ndarray) -> Pose:
             L[:, b] = L[:, p] @ local_lin[:, b]
             X[:, b] = X[:, p] + np.einsum("tij,tj->ti", L[:, p], lpos[:, b])
     O = L / (np.linalg.norm(L, axis=-2, keepdims=True) + 1e-12)   # normalise columns
-    return Pose(O, L, X, lpos, animated, pos_animated)
+    return Pose(O, L, X, lpos, lrot, lscl, animated, pos_animated)
 
 
 # ------------------------------------------------------------------------- export-pose matching
@@ -307,6 +313,8 @@ class ExportPose:
     O: np.ndarray        # (B,3,3) world orientation at export, glTF axes
     L: np.ndarray        # (B,3,3) world linear part at export, Unity axes
     lpos: np.ndarray     # (B,3) local positions at export
+    lrot: np.ndarray     # (B,4)
+    lscl: np.ndarray     # (B,3)
     k: float             # skeleton units -> GLB metres
     desc: str
     error: float         # rms bone position error (metres, after scale fit)
@@ -336,20 +344,34 @@ def match_export_pose(skel: Skeleton, meta: dict, clips: list[Clip]) -> ExportPo
         err = np.sqrt((d ** 2).sum(-1).mean(-1))
         i = int(np.argmin(err))
         if best is None or err[i] < best.error:
-            best = ExportPose(A @ P.O[i] @ A, P.L[i], P.lpos[i], float(k[i]),
+            best = ExportPose(A @ P.O[i] @ A, P.L[i], P.lpos[i], P.lrot[i], P.lscl[i], float(k[i]),
                               "rest pose" if c is None else f"{c.name.split('/')[-1]} @ {ts[i]:.2f}s", float(err[i]))
     return best
 
 
 # ------------------------------------------------------------------------- retarget / output
-def retarget(skel: Skeleton, clip: Clip, meta: dict, ex: ExportPose, fps: float = 30.0) -> dict:
-    """Per GLB bone: world delta rotation D(t) = O(t) O_export^-1 (glTF axes), and for bones with
-    position curves a position delta in GLB metres, expressed in world axes of the export pose
-    (the plugin rotates it with the parent). No absolute positions: the rig's own bone lengths are used."""
+ROOT_BONE = "Position"          # carries the chibi's movement through the scene in the game
+TRANSLATING_BONES = ("Position", "Hip")
+
+
+def retarget(skel: Skeleton, clip: Clip, meta: dict, ex: ExportPose, fps: float = 30.0,
+             root_motion: str = "inplace", ref_lpos: dict | None = None) -> dict:
+    """Per GLB bone: world delta rotation D(t) = O(t) O_export^-1 (glTF axes), and for the hip (and the
+    root in "full" mode) a position delta in GLB metres in world axes of the export pose (the plugin
+    rotates it with the parent). Bone lengths always come from the rig itself.
+
+    root_motion: "inplace" (default) freezes the root bone so the rig stays where it is and keeps the
+                 hip's bob/sway; "full" keeps the game's scene movement; "none" keeps no translation."""
     A = _axis(meta)
     n = max(2, int(round(clip.length * fps)) + 1)
     times = np.linspace(0, clip.length, n) if clip.length > 0 else np.zeros(1)
-    P = fk(skel, clip, times)
+    hold = {}
+    root_i = skel.by_name.get(ROOT_BONE)
+    if root_motion != "full" and root_i is not None:
+        hold[root_i] = (ex.lpos[root_i], ex.lrot[root_i], ex.lscl[root_i])
+    P = fk(skel, clip, times, hold)
+    ref_lpos = ref_lpos or {}
+    max_disp = 0.0
     Og = np.einsum("ij,tbjk,kl->tbil", A, P.O, A)
     gltf_names = {b["source"]: b["name"] for b in meta["skeleton"] if b.get("source")}
     moving = P.animated.copy()
@@ -368,20 +390,25 @@ def retarget(skel: Skeleton, clip: Clip, meta: dict, ex: ExportPose, fps: float 
                 q[t] = -q[t]
         entry = {"name": gltf_names[name], "rot": np.round(q, 5).reshape(-1).tolist()}
         par = skel.parents[b]
-        if P.pos_animated[b] and par >= 0:
-            dl = P.lpos[:, b] - ex.lpos[b]                       # parent-local, skeleton units
+        if (P.pos_animated[b] and par >= 0 and name in TRANSLATING_BONES and root_motion != "none"
+                and b not in hold):
+            ref = ref_lpos.get(b, ex.lpos[b])
+            dl = P.lpos[:, b] - ref                                  # parent-local, skeleton units
             dw = np.einsum("ij,tj->ti", A @ ex.L[par], dl) * ex.k   # world at export, glTF metres
             if np.abs(dw).max() > 1e-5:
                 entry["dpos"] = np.round(dw, 5).reshape(-1).tolist()
+                max_disp = max(max_disp, float(np.linalg.norm(dw, axis=1).max()))
         out_bones.append(entry)
     return {"name": clip.name.split("/")[-1], "path": clip.name, "fps": fps, "frames": len(times),
             "length": float(clip.length), "loop": clip.loop,
             "kind": "loop" if clip.name.endswith("_loop") else "start" if clip.name.endswith("_s")
             else "end" if clip.name.endswith("_e") else "once",
+            "rootMotion": root_motion, "maxDisplacement": max_disp,
             "bones": out_bones}
 
 
-def port_character_animations(gd, meta_path: str, include_general=False, fps=30.0, log=print) -> list[str]:
+def port_character_animations(gd, meta_path: str, include_general=False, fps=30.0, log=print,
+                              root_motion: str = "inplace") -> list[str]:
     """Decode all mini clips for the character in a converted GLB's sidecar, write anim JSONs next to it."""
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
@@ -410,6 +437,19 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
     if ex.error / height > 0.05:
         log("  warning: export pose not recognised well; animations may look twisted. "
             "Re-export the PMX right after loading the mini, without changing the animation.")
+    # hip baseline: the export pose, unless the clips put the hip somewhere implausibly far from it
+    # (then the clips' own idle frame is the better baseline)
+    ref_lpos = {}
+    hip = skel.by_name.get("Hip")
+    idle = next((c for c in clips if "idle" in c.name and c.name.endswith("_loop")), None) or \
+        next((c for c in clips if c.name.endswith("_loop")), None)
+    if hip is not None and idle is not None and skel.parents[hip] >= 0:
+        idle0 = fk(skel, idle, np.zeros(1)).lpos[0, hip]
+        off = float(np.linalg.norm(ex.L[skel.parents[hip]] @ (idle0 - ex.lpos[hip])) * ex.k)
+        if off > 0.1 * height:
+            ref_lpos[hip] = idle0
+            log(f"  hip baseline: export pose is {off / height:.0%} of height from {idle.name.split('/')[-1]}; "
+                "using that clip's first frame as the baseline")
     out_dir = os.path.join(os.path.dirname(meta_path), "anims", os.path.splitext(meta["glb"])[0])
     os.makedirs(out_dir, exist_ok=True)
     for old in os.listdir(out_dir):
@@ -417,15 +457,18 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
             os.remove(os.path.join(out_dir, old))
     written = []
     for c in clips:
-        data = retarget(skel, c, meta, ex, fps)
+        data = retarget(skel, c, meta, ex, fps, root_motion, ref_lpos)
         if not data["bones"]:
             continue
+        if data["maxDisplacement"] > 0.25 * height:
+            log(f"  note: {data['name']} moves the hip up to {data['maxDisplacement'] / height:.0%} of the model's height")
         p = os.path.join(out_dir, data["name"] + ".json")
         with open(p, "w", encoding="utf-8") as f:
             json.dump(data, f, separators=(",", ":"))
         written.append(p)
     meta["animations"] = [os.path.basename(p)[:-5] for p in written]
     meta["exportPose"] = {"source": ex.desc, "error": ex.error, "scale": ex.k}
+    meta["rootMotion"] = root_motion
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     kinds = {}

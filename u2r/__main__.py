@@ -30,6 +30,7 @@ def cli(argv):
     an.add_argument("meta", nargs="+", help="Uma_*.json files next to the .glb")
     an.add_argument("--general", action="store_true", help="also General mini animations")
     an.add_argument("--fps", type=float, default=30.0)
+    an.add_argument("--root-motion", choices=["inplace", "full", "none"], default="inplace")
     l = sub.add_parser("list", help="list characters with mini models and their port status")
     l.add_argument("--game-dir", default=s.get("game_dir") or catalog.find_game_dir(uv))
     l.add_argument("--unported", action="store_true")
@@ -41,7 +42,7 @@ def cli(argv):
         gd = GameData(s.get("game_dir") or catalog.find_game_dir(uv), uv)
         for m in a.meta:
             print(m)
-            port_character_animations(gd, m, a.general, a.fps)
+            port_character_animations(gd, m, a.general, a.fps, root_motion=a.root_motion)
         return
     if a.cmd == "convert":
         o = Options.from_dict(s.get("options", {}))

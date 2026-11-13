@@ -49,6 +49,10 @@ every conversion:
   and the motion is retargeted onto the GLB's bones → `Uma2Roblox_Export\anims\<model>\*.json`.
   Only **rotations** plus small position deltas (hips etc.) are sent; bone lengths always come from the rig
   in Studio, so the animation fits the imported/uploaded rig's size
+* **Root motion** (*Options → Root motion*): mini clips also move and turn the root `Position` bone through
+  the game scene. **inplace** (default) freezes it so the rig stays where it is and keeps only the hip's
+  bob and sway, which is what Roblox animations expect. **full** keeps the scene movement, and **none** removes all
+  translation. Fine-tune the hip movement in Studio with the plugin's **Root motion scale** (1 = as in game)
 
 In Studio, **Apply Uma Toon** then imports them automatically: it fits the bones, builds a `KeyframeSequence` per
 clip in `ServerStorage.RBX_ANIMSAVES.<model>` and adds an `AnimationController`. Open them in the

@@ -34,6 +34,7 @@ if cfg.autoTransparency == nil then
 	cfg.autoTransparency = true
 end
 cfg.transparentParts = cfg.transparentParts or "cheek,mayu"
+cfg.rootMotionScale = cfg.rootMotionScale or 1
 local function saveSettings()
 	plugin:SetSetting(SETTINGS_KEY, cfg)
 end
@@ -365,7 +366,9 @@ local function buildSequence(anim, fit, bonesByName, order)
 				local pos = base.Position
 				if d.dpos then
 					local pi = f * 3
-					local dv = R:VectorToWorldSpace(Vector3.new(d.dpos[pi + 1], d.dpos[pi + 2], d.dpos[pi + 3]) * fit.s)
+					local dv = R:VectorToWorldSpace(
+						Vector3.new(d.dpos[pi + 1], d.dpos[pi + 2], d.dpos[pi + 3]) * (fit.s * cfg.rootMotionScale)
+					)
 					if parent:IsA("Bone") then
 						local parentDelta = worldAt[parent].Rotation * restWorld[parent].Rotation:Inverse()
 						dv = parentDelta:VectorToWorldSpace(dv)
@@ -595,6 +598,10 @@ numberRow("Target height (studs, 0 = keep)", cfg.targetHeight, function(n)
 end)
 toggleRow("Extra Highlight silhouette outline", cfg.highlightOutline, function(v)
 	cfg.highlightOutline = v
+	saveSettings()
+end)
+numberRow("Root motion scale (hip movement, 1 = as in game)", cfg.rootMotionScale, function(n)
+	cfg.rootMotionScale = math.max(0, n)
 	saveSettings()
 end)
 toggleRow("Also import its mini animations", cfg.autoAnimations, function(v)

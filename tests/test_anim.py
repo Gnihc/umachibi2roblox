@@ -124,6 +124,24 @@ def main():
     assert all("pos" not in b for b in out["bones"]) and all("dpos" not in b for b in out["bones"] if b["name"] != "Hip")
     print("retarget ok:", out["name"], out["frames"], "frames,", len(out["bones"]), "bones, hip dpos", hipb["dpos"][:3])
 
+    # root motion: the clip also moves/turns the root "Position" bone through the scene
+    cr = make_clip()
+    cr.tracks[(path_hash("Position"), 1)] = lambda T: np.stack([T * 2.0, 0 * T, 0 * T], -1)   # 2 m/s sideways
+    cr.tracks[(path_hash("Position"), 2)] = lambda T: np.stack([0 * T, np.sin(np.pi * T / 2), 0 * T, np.cos(np.pi * T / 2)], -1)  # turn 180
+    inplace = retarget(sk, cr, meta, ex)
+    assert [b["name"] for b in inplace["bones"]] == ["Hip", "Spine", "Head", "Arm_L"]      # Position frozen
+    hp_in = next(b for b in inplace["bones"] if b["name"] == "Hip")
+    assert np.allclose(np.array(hp_in["dpos"]).reshape(-1, 3), [0, 0.01, 0], atol=1e-6)    # only the hip bob
+    assert np.allclose(np.array(next(b for b in inplace["bones"] if b["name"] == "Spine")["rot"]).reshape(-1, 4)[-1],
+                       np.array(spine["rot"]).reshape(-1, 4)[-1], atol=1e-5)               # no root turn leaks in
+    full = retarget(sk, cr, meta, ex, root_motion="full")
+    pos_full = next(b for b in full["bones"] if b["name"] == "Position")
+    assert abs(np.array(pos_full["dpos"]).reshape(-1, 3)[-1][0]) > 1.9                      # scene movement kept
+    none = retarget(sk, cr, meta, ex, root_motion="none")
+    assert all("dpos" not in b for b in none["bones"])
+    print("root motion ok: inplace bones", [b["name"] for b in inplace["bones"]], "| full Position dx",
+          round(np.array(pos_full["dpos"]).reshape(-1, 3)[-1][0], 3), "| max disp inplace", round(inplace["maxDisplacement"], 4))
+
     # the bug from the screenshot: game skeleton with a scaled root, GLB in different units
     sks = skeleton(); sks.rest_scl[1] = [0.5, 0.5, 0.5]           # Position scaled 0.5
     Xs = fk(sks, None, np.zeros(1)).X

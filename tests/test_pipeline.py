@@ -73,6 +73,8 @@ def main():
     assert names == ["Spine", "Head"], names     # Arm_L isn't in the GLB (no weights) -> skipped
     meta = json.load(open(r.meta))
     assert meta["exportPose"]["source"] == "rest pose" and meta["exportPose"]["error"] < 1e-4, meta["exportPose"]
+    assert meta["rootMotion"] == "inplace" and a["rootMotion"] == "inplace"
+
     reg = Registry(); reg.load(out)
     err = reg.start_server(); assert err is None, err
     try:
@@ -85,6 +87,30 @@ def main():
         print("server ok:", model, idx["animations"], "| skeleton", [b["name"] for b in idx["skeleton"]])
     finally:
         reg.stop_server()
+
+    # hip baseline fallback: clip keeps the hip far below the export pose -> idle frame 0 becomes the baseline
+    import u2r.anim as A
+    orig = _clip_env
+
+    def low_hip_env():
+        env = orig()
+        tt = env.objects[0].read_typetree()
+        tt["m_Name"] = "anm_min_eve_chr1001_00_idle01_loop"
+        tt["m_ClipBindingConstant"]["genericBindings"].append({"path": path_hash("Position/Hip"), "attribute": 1, "typeID": 4})
+        tt["m_MuscleClip"]["m_Clip"]["data"]["m_ConstantClip"]["data"] = [0.0, 0.1, 0.0]   # Hip at 0.10 vs rest 0.24
+        return env
+
+    class LowGD(FakeGD):
+        def mini_clips(self, cid, general=False):
+            return ["3d/motion/mini/event/body/chara/chr1001_00/anm_min_eve_chr1001_00_idle01_loop"]
+        def load(self, name):
+            return prefab_env() if "pfb_mbdy" in name else low_hip_env()
+    logs = []
+    w2 = A.port_character_animations(LowGD(), r.meta, log=logs.append)
+    d2 = json.load(open(w2[0]))
+    assert any("hip baseline" in l for l in logs), logs
+    assert all("dpos" not in b for b in d2["bones"]), [b["name"] for b in d2["bones"] if "dpos" in b]  # constant -> no offset
+    print("hip baseline ok:", [l.strip() for l in logs if "baseline" in l][0][:70], "...")
 
 
 if __name__ == "__main__":

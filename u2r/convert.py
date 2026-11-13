@@ -47,6 +47,7 @@ class Options:
     port_animations: bool = True
     general_animations: bool = False
     anim_fps: float = 30.0
+    root_motion: str = "inplace"     # inplace | full | none
 
     @classmethod
     def from_dict(cls, d: dict) -> "Options":
