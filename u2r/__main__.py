@@ -4,6 +4,7 @@
   Uma2Roblox.exe convert X.pmx [-o DIR]  convert one UmaViewer PMX export
   Uma2Roblox.exe list [--game-dir DIR]   print characters and port status
   Uma2Roblox.exe general [TEXT]          list General mini animations (not tied to a character)
+  Uma2Roblox.exe plugin [--install]      check (or install / update) the Roblox Studio plugin
   Uma2Roblox.exe anims X.json --with C   port X's animations plus General clip C (remembered by X)
 """
 import argparse
@@ -33,6 +34,8 @@ def cli(argv):
     an.add_argument("--general", action="store_true", help="also every General mini animation")
     an.add_argument("--with", dest="with_clips", action="append", default=[], metavar="CLIP",
                     help="attach one General clip (e.g. anm_min_cir_type00_01_101); repeatable, remembered per model")
+    pl = sub.add_parser("plugin", help="check the Roblox Studio plugin is installed and up to date")
+    pl.add_argument("--install", action="store_true", help="install / update it in Studio's Plugins folder")
     gl = sub.add_parser("general", help="list General mini animations (not tied to a character)")
     gl.add_argument("filter", nargs="?", default="", help="only names containing this text")
     an.add_argument("--fps", type=float, default=30.0)
@@ -66,6 +69,16 @@ def cli(argv):
             print(m)
             port_character_animations(gd, m, a.general, a.fps, root_motion=a.root_motion, extra_clips=a.with_clips)
         return
+    if a.cmd == "plugin":
+        from . import studio_plugin
+        if a.install:
+            print("installed:", studio_plugin.install(), "(close and reopen the place in Studio to load it)")
+        st = studio_plugin.status()
+        print(f"{st['state']}: {st['message']}")
+        for p in st["installed"]:
+            print("  in Studio:", p)
+        print("  this app's copy:", st["bundled"])
+        sys.exit(0 if st["state"] == "ok" else 1)
     if a.cmd == "general":
         from .gamedata import GameData, clip_category
         gd = GameData(s.get("game_dir") or catalog.find_game_dir(uv), uv)

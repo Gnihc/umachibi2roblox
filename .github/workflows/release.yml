@@ -39,10 +39,10 @@ jobs:
           python tests/test_face.py
 
       - name: Build app (no console)
-        run: pyinstaller --noconfirm --onefile --windowed --collect-all UnityPy --collect-all apsw --name Uma2Roblox uma2roblox.py
+        run: pyinstaller --noconfirm --onefile --windowed --collect-all UnityPy --collect-all apsw --add-data "roblox/Uma2Roblox.plugin.lua;roblox" --name Uma2Roblox uma2roblox.py
 
       - name: Build command-line tool
-        run: pyinstaller --noconfirm --onefile --console --collect-all UnityPy --collect-all apsw --name Uma2Roblox-cli uma2roblox.py
+        run: pyinstaller --noconfirm --onefile --console --collect-all UnityPy --collect-all apsw --add-data "roblox/Uma2Roblox.plugin.lua;roblox" --name Uma2Roblox-cli uma2roblox.py
 
       - name: Smoke-test the built exe
         shell: pwsh

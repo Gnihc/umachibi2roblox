@@ -429,6 +429,7 @@ class App:
         err = self.registry.start_server()
         self.log(err or f"Studio sync server: http://localhost:{PORT}/uma2roblox/status")
         self.reload_characters()
+        self.check_plugin()
         self.watcher = Watcher(self)
         self.watcher.start()
         self.log("Watching for UmaViewer exports in:\n  " + "\n  ".join(self.watch_dirs()))
@@ -482,6 +483,17 @@ class App:
             e.bind("<Return>", lambda _e, k=key: self.set_path(k, self.path_vars[k].get()))
             ttk.Button(top, text="Browse…", command=lambda k=key: self.browse(k)).grid(row=i, column=2, padx=(6, 0))
         top.columnconfigure(1, weight=1)
+        self._top = top
+
+        # Studio plugin warning (shown only when it's missing or outdated)
+        self.plugin_bar = tk.Frame(self.root, bg="#fff3cd", padx=8, pady=6, highlightthickness=1,
+                                   highlightbackground="#e0b84c")
+        self.plugin_msg = tk.Label(self.plugin_bar, text="", bg="#fff3cd", fg="#5c3d00", justify="left",
+                                   anchor="w", wraplength=760)
+        self.plugin_msg.pack(side="left", fill="x", expand=True)
+        self.plugin_btn = ttk.Button(self.plugin_bar, text="Install plugin", command=self.install_plugin)
+        self.plugin_btn.pack(side="right", padx=(8, 0))
+        self._plugin_state = None
 
         bar = ttk.Frame(self.root, padding=(10, 6))
         bar.pack(fill="x")
@@ -543,6 +555,41 @@ class App:
         ttk.Button(qb, text="Clear", command=self.clear_queue).pack(side="left", padx=4)
         ttk.Button(qb, text="Copy next name", command=self.copy_next).pack(side="right")
 
+
+    # ---------------------------------------------------------------- Studio plugin
+    def check_plugin(self, repeat=True):
+        """Warn (banner + log) when Studio's Plugins folder has no Uma2Roblox plugin or an outdated one.
+        Re-checked every 30 s, so installing or updating it by hand clears the warning."""
+        from . import studio_plugin
+        try:
+            st = studio_plugin.status()
+        except Exception as ex:
+            st = {"state": "unknown", "message": f"Couldn't check the Studio plugin: {ex}"}
+        if st["state"] != self._plugin_state:
+            self._plugin_state = st["state"]
+            if st["state"] in ("missing", "outdated"):
+                self.plugin_msg.config(text="⚠ " + st["message"])
+                self.plugin_btn.config(text="Install plugin" if st["state"] == "missing" else "Update plugin",
+                                       state="normal" if st.get("bundled") else "disabled")
+                self.plugin_bar.pack(fill="x", padx=10, pady=(6, 0), after=self._top)
+                self.log("WARNING: " + st["message"])
+            else:
+                self.plugin_bar.pack_forget()
+                if st["state"] == "unknown":
+                    self.log(st["message"])
+        if repeat:
+            self.root.after(30000, self.check_plugin)
+
+    def install_plugin(self):
+        from . import studio_plugin
+        try:
+            dst = studio_plugin.install()
+        except Exception as ex:
+            messagebox.showerror(APP, f"Couldn't install the Studio plugin:\n{ex}", parent=self.root)
+            return
+        self.log(f"Studio plugin installed: {dst}  (close and reopen the place in Studio to load it)")
+        self._plugin_state = None
+        self.check_plugin(repeat=False)
 
     def _toggle_only(self):
         self.settings["only_unported"] = self.only_unported.get()
