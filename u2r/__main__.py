@@ -53,7 +53,15 @@ def cli(argv):
         reg = Registry()
         reg.load(a.out)
         for p in a.pmx:
-            r = convert(p, a.out, o)
+            ear = None
+            if o.ear_bones:
+                try:
+                    from .gamedata import GameData
+                    from .rig import ear_rig_for
+                    ear = ear_rig_for(GameData(s.get("game_dir") or catalog.find_game_dir(uv), uv), p)
+                except Exception as ex:
+                    print(f"  ears: game rig not available ({ex})")
+            r = convert(p, a.out, o, ear_rig=ear)
             reg.mark_exported(r.chara_id, r.name, r.costume, os.path.basename(r.glb))
             print(f"{r.glb}  ({r.meshes} meshes, {r.triangles} tris, {r.bones} bones{'' if r.is_mini else ', NOT mini'})")
     else:

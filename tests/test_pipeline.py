@@ -38,6 +38,7 @@ def prefab_env():
 
 
 class FakeGD:
+    entries = {}
     def mini_body_prefab(self, cid, costume): return "3d/chara/mini/body/mbdy1001_00/pfb_mbdy1001_00"
     def mini_clips(self, cid, general=False): return ["3d/motion/mini/event/body/chara/chr1001_00/anm_min_eve_chr1001_00_test01_loop"]
     def load(self, name):

@@ -49,6 +49,11 @@ every conversion:
   and the motion is retargeted onto the GLB's bones → `Uma2Roblox_Export\anims\<model>\*.json`.
   Only **rotations** plus small position deltas (hips etc.) are sent; bone lengths always come from the rig
   in Studio, so the animation fits the imported/uploaded rig's size
+* **Ear motion**: each body clip's matching ear clip (`…/body/…/<clip>` → `…/facial/…/<clip>_ear`; the
+  `_ear_driven` ones aren't bone motion) is merged in, so ears move with the body. UmaViewer's PMX export drops all
+  `Ear*` bones, so with *Options → Ear bones from game rig* on (default) the converter takes the ear bones from the
+  mini head/hair prefab in your game data, adds them under `Head` in the GLB, and skins the ear part of the hair to
+  them (geometric weights that blend into the head at the ear base). Mini clips have no tail motion.
 * **Root motion** (*Options → Root motion*): mini clips also move and turn the root `Position` bone through
   the game scene. **inplace** (default) freezes it so the rig stays where it is and keeps only the hip's
   bob and sway, which is what Roblox animations expect. **full** keeps the scene movement, and **none** removes all

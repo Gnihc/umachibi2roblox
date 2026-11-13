@@ -21,7 +21,7 @@ from dataclasses import dataclass, field, asdict
 import numpy as np
 from PIL import Image
 
-from .pmx import Model, read_pmx
+from .pmx import Bone, Model, read_pmx
 
 PMX_TO_METERS = 0.08  # UmaViewer divides Unity units by 0.08 when writing PMX
 
@@ -48,6 +48,7 @@ class Options:
     general_animations: bool = False
     anim_fps: float = 30.0
     root_motion: str = "inplace"     # inplace | full | none
+    ear_bones: bool = True           # add the game's ear bones (UmaViewer's PMX drops them) so ears can animate
 
     @classmethod
     def from_dict(cls, d: dict) -> "Options":
@@ -392,7 +393,61 @@ def _write_glb(path, name, joint_names, joint_pos, joint_parent, prims, images, 
 
 
 # ------------------------------------------------------------------------- main entry
-def convert(pmx_path: str, out_dir: str, opt: Options | None = None, log=print) -> Result:
+def _inject_ears(model: Model, pos: np.ndarray, joints: np.ndarray, weights: np.ndarray, faces: np.ndarray,
+                 ear: dict, head: int, warnings: list) -> int:
+    """Add the game's ear bones (dropped by UmaViewer's PMX export) and skin the ear vertices to them."""
+    from . import rig
+    to_g = np.array([-1, 1, 1], np.float64)              # Unity -> glTF (before the facing flip)
+    flip = np.array([1, 1, -1], np.float64)
+    names = [(b.name_en or b.name) for b in model.bones]
+    if any(n.lower().startswith("ear") for n in names):
+        return 0                                         # this PMX already has ear bones
+    gpos = {n: model.bones[i].position * flip * PMX_TO_METERS for i, n in enumerate(names)}
+    pairs = [(np.array(u) * to_g, gpos[n]) for n, u in ear["common"].items() if n in gpos]
+    if len(pairs) < 2:
+        warnings.append("Ear bones: too few common bones to place them; ears stay fixed to the head.")
+        return 0
+    a = np.array([p[0] for p in pairs]); b = np.array([p[1] for p in pairs])
+    ca, cb = a.mean(0), b.mean(0)
+    k = float(((a - ca) * (b - cb)).sum() / max(((a - ca) ** 2).sum(), 1e-12))
+    place = {e["name"]: k * (np.array(e["unity"]) * to_g - ca) + cb for e in ear["bones"]}
+
+    index = {n: i for i, n in enumerate(names)}
+    for e in ear["bones"]:
+        parent = index.get(e["parent"], head)
+        g = place[e["name"]]
+        model.bones.append(Bone(e["name"], e["name"], (g * flip / PMX_TO_METERS).astype(np.float32), parent))
+        index[e["name"]] = len(model.bones) - 1
+
+    # candidate vertices: hair materials (ears are part of the hair mesh) that currently follow the head
+    hair = np.zeros(len(pos), bool)
+    start = 0
+    for m in model.materials:
+        f = faces[start // 3:(start + m.face_count) // 3]
+        start += m.face_count
+        if "hair" in (m.name + " " + m.name_en).lower() or (0 <= m.texture < len(model.textures)
+                                                            and "hair" in model.textures[m.texture].lower()):
+            hair[f.reshape(-1)] = True
+    dominant = joints[np.arange(len(joints)), np.argmax(weights, 1)]
+    cand = np.where((dominant == head) & (hair if hair.any() else True))[0]
+    chains = ear["chains"]
+    assigned = 0
+    for chain, (vids, seg, w) in zip(chains, rig.ear_weights(pos, cand, [[place[n] for n in ch] for ch in chains],
+                                                             gpos[names[head]])):
+        bones_idx = np.array([index[n] for n in chain])
+        joints[vids] = 0
+        weights[vids] = 0
+        joints[vids, 0] = bones_idx[seg]
+        weights[vids, 0] = w
+        joints[vids, 1] = head
+        weights[vids, 1] = 1 - w
+        assigned += len(vids)
+    if assigned == 0:
+        warnings.append("Ear bones added, but no ear vertices were found near them.")
+    return assigned
+
+
+def convert(pmx_path: str, out_dir: str, opt: Options | None = None, log=print, ear_rig: dict | None = None) -> Result:
     o = opt or Options()
     model = read_pmx(pmx_path)
     warnings = list(model.warnings)
@@ -424,6 +479,12 @@ def convert(pmx_path: str, out_dir: str, opt: Options | None = None, log=print) 
     joints[none, 0] = head
     weights[none] = (1, 0, 0, 0)
     weights /= weights.sum(1, keepdims=True)
+    if ear_rig:
+        n_ear = _inject_ears(model, pos, joints, weights, model.faces, ear_rig, head, warnings)
+        if n_ear:
+            log(f"  ears: {len(ear_rig['bones'])} bone(s) added from the game rig, {n_ear} vertices skinned")
+        bone_pos = (np.array([b.position for b in model.bones], np.float32).reshape(-1, 3)) * flip * PMX_TO_METERS
+        nb = len(model.bones)
 
     # ---- split into one primitive per material (Roblox: one texture per MeshPart)
     prims: list[_Prim] = []
@@ -513,6 +574,10 @@ def convert(pmx_path: str, out_dir: str, opt: Options | None = None, log=print) 
     for p in prims:
         used[np.unique(p.joints[p.weights > 0])] = True
     used[head] = True
+    if ear_rig:   # keep every injected ear bone so ear clips can drive the whole chain
+        for i, b in enumerate(model.bones):
+            if (b.name_en or b.name).lower().startswith("ear"):
+                used[i] = True
     keep = np.zeros(nb, bool)
     for i in range(nb):
         if used[i] or not o.prune_bones:

@@ -350,6 +350,11 @@ def match_export_pose(skel: Skeleton, meta: dict, clips: list[Clip]) -> ExportPo
 
 
 # ------------------------------------------------------------------------- retarget / output
+def ear_clip_name(body_clip: str) -> str:
+    """3d/motion/mini/<x>/body/<y>/<name>  ->  3d/motion/mini/<x>/facial/<y>/<name>_ear"""
+    return body_clip.replace("/body/", "/facial/", 1) + "_ear"
+
+
 ROOT_BONE = "Position"          # carries the chibi's movement through the scene in the game
 TRANSLATING_BONES = ("Position", "Hip")
 
@@ -413,24 +418,39 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     cid, costume = meta["charaId"], meta["costume"]
-    prefab = gd.mini_body_prefab(cid, costume)
-    if not prefab:
-        raise RuntimeError("No mini body prefab found in the game data.")
-    skel = skeleton_from_env(gd.load(prefab))
+    from .rig import build_skeleton
+    skel = build_skeleton(gd, cid, costume, log)          # body + head prefabs (ear bones live on the head)
     names = gd.mini_clips(cid, include_general)
     if not names:
         log(f"  no mini animations found for {cid}")
         return []
-    clips = []
+    def load_clip(n):
+        for o in gd.load(n).objects:
+            if o.type.name == "AnimationClip":
+                return decode_clip(o.read_typetree(), n)
+        return None
+
+    clips, with_ears = [], 0
     for n in names:
         try:
-            env = gd.load(n)
-            for o in env.objects:
-                if o.type.name == "AnimationClip":
-                    clips.append(decode_clip(o.read_typetree(), n))
-                    break
+            c = load_clip(n)
+            if c is None:
+                continue
+            # ear motion lives in a sibling clip: <...>/facial/<...>_ear (the *_ear_driven ones are not bone motion)
+            ear_name = ear_clip_name(n)
+            if ear_name in gd.entries:
+                try:
+                    e = load_clip(ear_name)
+                    if e is not None:
+                        c.tracks.update(e.tracks)
+                        c.length = max(c.length, e.length)
+                        with_ears += 1
+                except Exception as ex:
+                    log(f"  ear clip {ear_name.split('/')[-1]} skipped: {ex}")
+            clips.append(c)
         except Exception as ex:
             log(f"  skip {n.split('/')[-1]}: {ex}")
+    log(f"  {len(clips)} clip(s), {with_ears} with ear motion")
     ex = match_export_pose(skel, meta, clips)
     height = float(meta.get("heightMeters", 1.0)) or 1.0
     log(f"  export pose: {ex.desc} (fit error {ex.error / height:.1%} of height, scale {ex.k:.3f})")

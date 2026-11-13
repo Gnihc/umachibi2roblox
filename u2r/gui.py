@@ -113,7 +113,14 @@ class Watcher(threading.Thread):
                     shutil.copy2(pmx, dst_pmx)
             else:
                 shutil.copy2(pmx, dst_pmx)
-            res = convert(dst_pmx, app.out_dir(), app.options(), log=lambda s: app.post("log", s))
+            ear = None
+            if app.options().ear_bones:
+                try:
+                    from .rig import ear_rig_for
+                    ear = ear_rig_for(app.gamedata(), dst_pmx, log=lambda s: app.post("log", s))
+                except Exception as ex:
+                    app.post("log", f"  ears: game rig not available ({ex}); ears stay fixed to the head")
+            res = convert(dst_pmx, app.out_dir(), app.options(), log=lambda s: app.post("log", s), ear_rig=ear)
             app.registry.mark_exported(res.chara_id, res.name, res.costume, os.path.basename(res.glb))
             app.post("converted", res)
             if app.options().port_animations:
@@ -147,6 +154,7 @@ class OptionsDialog(tk.Toplevel):
             "general_animations": tk.BooleanVar(value=o.general_animations),
             "anim_fps": tk.DoubleVar(value=o.anim_fps),
             "root_motion": tk.StringVar(value=o.root_motion),
+            "ear_bones": tk.BooleanVar(value=o.ear_bones),
             "outline_exclude": tk.StringVar(value=o.outline_exclude),
             "cel_exclude": tk.StringVar(value=o.cel_exclude),
         }
@@ -174,6 +182,7 @@ class OptionsDialog(tk.Toplevel):
         row("Max texture size", ttk.Combobox(f, textvariable=self.v["max_texture"], values=[256, 512, 1024], state="readonly", width=10))
         row("Prune unused bones", ttk.Checkbutton(f, variable=self.v["prune_bones"]))
         row("Key out background (no alpha)", ttk.Entry(f, textvariable=self.v["colorkey_parts"], width=34))
+        row("Ear bones from game rig (for ear motion)", ttk.Checkbutton(f, variable=self.v["ear_bones"]))
         row("Port mini animations", ttk.Checkbutton(f, variable=self.v["port_animations"]))
         row("  …include General mini animations", ttk.Checkbutton(f, variable=self.v["general_animations"]))
         row("  Animation keyframes per second", ttk.Combobox(f, textvariable=self.v["anim_fps"], values=[10, 15, 20, 30], width=10))
@@ -212,6 +221,7 @@ class OptionsDialog(tk.Toplevel):
                 "general_animations": self.v["general_animations"].get(),
                 "anim_fps": float(self.v["anim_fps"].get()),
                 "root_motion": self.v["root_motion"].get(),
+                "ear_bones": self.v["ear_bones"].get(),
                 "outline_exclude": self.v["outline_exclude"].get(),
                 "cel_exclude": self.v["cel_exclude"].get(),
             }
