@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import catalog
-from .convert import Options, convert
+from .convert import Options, convert, is_character
 from .pmx import read_pmx
 from .registry import PORT, Registry
 from .settings import load_settings, save_settings
@@ -84,9 +84,13 @@ class Watcher(threading.Thread):
 
     def process(self, pmx: str, move: bool):
         app = self.app
-        app.post("log", f"Found export: {pmx}")
         try:
             model = read_pmx(pmx)
+            if move and not is_character(pmx, model):
+                # watched folder: leave props / stages / other exports alone
+                app.post("log", f"Skipped (not a character export, left in place): {os.path.basename(pmx)}")
+                return
+            app.post("log", f"Found export: {pmx}")
             stem = os.path.splitext(os.path.basename(pmx))[0]
             work = os.path.join(app.out_dir(), "work", f"{stem}_{time.strftime('%Y%m%d-%H%M%S')}")
             os.makedirs(work, exist_ok=True)

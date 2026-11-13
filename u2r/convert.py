@@ -97,6 +97,15 @@ def sanitize(s: str) -> str:
     return s or "_"
 
 
+def is_character(pmx_path: str, model: Model) -> bool:
+    """UmaViewer names character exports '<id>_<name>.pmx'; props/stages are '<prefab> (UmaContainerProp).pmx'."""
+    stem = os.path.splitext(os.path.basename(pmx_path))[0]
+    if "(UmaContainerProp)" in stem:
+        return False
+    names = " ".join([x.name for x in model.materials] + model.textures).lower()
+    return bool(FILE_RE.match(stem)) or any(k in names for k in ("mbdy", "mchr", "bdy", "chr"))
+
+
 def identify(pmx_path: str, model: Model) -> tuple[int, str, str, bool]:
     """-> (chara_id, costume, display_name, is_mini) from the file name and texture/material names."""
     stem = os.path.splitext(os.path.basename(pmx_path))[0]
@@ -439,6 +448,12 @@ def convert(pmx_path: str, out_dir: str, opt: Options | None = None, log=print) 
             pos=pos[used], nrm=nrm[used], uv=uv,
             joints=joints[used], weights=weights[used],
             faces=inv.reshape(-1, 3).astype(np.int32), tex_path=tex_path))
+
+    if not prims:
+        raise ValueError(
+            f"{os.path.basename(pmx_path)} has no exportable geometry ({len(model.positions)} vertices, "
+            f"{len(model.faces)} triangles, {len(model.materials)} materials). "
+            "UmaViewer may have failed to read its meshes; it's probably not a character model.")
 
     # ---- face the model toward +Z (glTF front)
     fwd = _detect_forward(prims)
