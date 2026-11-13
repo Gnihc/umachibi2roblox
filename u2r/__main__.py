@@ -3,6 +3,8 @@
   Uma2Roblox.exe                         open the app
   Uma2Roblox.exe convert X.pmx [-o DIR]  convert one UmaViewer PMX export
   Uma2Roblox.exe list [--game-dir DIR]   print characters and port status
+  Uma2Roblox.exe general [TEXT]          list General mini animations (not tied to a character)
+  Uma2Roblox.exe anims X.json --with C   port X's animations plus General clip C (remembered by X)
 """
 import argparse
 import os
@@ -28,7 +30,11 @@ def cli(argv):
     c.add_argument("--no-outline", action="store_true")
     an = sub.add_parser("anims", help="port mini animations for converted model(s) (their .json sidecars)")
     an.add_argument("meta", nargs="+", help="Uma_*.json files next to the .glb")
-    an.add_argument("--general", action="store_true", help="also General mini animations")
+    an.add_argument("--general", action="store_true", help="also every General mini animation")
+    an.add_argument("--with", dest="with_clips", action="append", default=[], metavar="CLIP",
+                    help="attach one General clip (e.g. anm_min_cir_type00_01_101); repeatable, remembered per model")
+    gl = sub.add_parser("general", help="list General mini animations (not tied to a character)")
+    gl.add_argument("filter", nargs="?", default="", help="only names containing this text")
     an.add_argument("--fps", type=float, default=30.0)
     an.add_argument("--root-motion", choices=["inplace", "full", "none"], default="inplace")
     ins = sub.add_parser("inspect", help="describe what mini clips animate (writes inspect_<x>.json)")
@@ -58,7 +64,15 @@ def cli(argv):
         gd = GameData(s.get("game_dir") or catalog.find_game_dir(uv), uv)
         for m in a.meta:
             print(m)
-            port_character_animations(gd, m, a.general, a.fps, root_motion=a.root_motion)
+            port_character_animations(gd, m, a.general, a.fps, root_motion=a.root_motion, extra_clips=a.with_clips)
+        return
+    if a.cmd == "general":
+        from .gamedata import GameData, clip_category
+        gd = GameData(s.get("game_dir") or catalog.find_game_dir(uv), uv)
+        for n in gd.general_clips():
+            short = n.split("/")[-1]
+            if a.filter.lower() in short.lower():
+                print(f"{clip_category(n)}\t{short}")
         return
     if a.cmd == "convert":
         o = Options.from_dict(s.get("options", {}))

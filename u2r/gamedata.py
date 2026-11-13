@@ -118,20 +118,22 @@ class GameData:
                 out.setdefault(int(m.group(1)), []).append(m.group(2))
         return {k: sorted(set(v)) for k, v in out.items()}
 
-    def mini_clips(self, chara_id: int, include_general: bool = False) -> list[str]:
-        """Same filter as UmaViewer's Animations > Mini list."""
-        out = []
-        for n in self.entries:
-            if not n.startswith("3d/motion/") or "mini" not in n:
-                continue
-            if any(x in n for x in ("mirror", "facial", "_cam")) or n.endswith("_s") or n.endswith("_e"):
-                continue
-            if f"chara/chr{chara_id}" in n and "pose" not in n:
-                out.append(n)
-            elif include_general and ("/type0" in n or "/type99" in n or "anm_sty_" in n) and not any(
-                    x in n for x in ("/tail", "prop")) and not n.endswith(("_pos", "_pose")):
-                out.append(n)
-        # UmaViewer plays <x>_s (start) before <x>_loop and <x>_e at the end: port them as separate clips
+    @staticmethod
+    def _listed_mini_clip(n: str) -> bool:
+        """A mini body clip UmaViewer lists (start/end halves and helper clips are not listed)."""
+        return (n.startswith("3d/motion/") and "mini" in n
+                and not any(x in n for x in ("mirror", "facial", "_cam"))
+                and not n.endswith(("_s", "_e")))
+
+    @staticmethod
+    def _general(n: str) -> bool:
+        """Not tied to a character: the Mini > General list (works on every mini, they share one skeleton)."""
+        return (("/type0" in n or "/type99" in n or "anm_sty_" in n)
+                and not any(x in n for x in ("/tail", "prop")) and not n.endswith(("_pos", "_pose")))
+
+    def with_siblings(self, names) -> list[str]:
+        """UmaViewer plays <x>_s (start) before <x>_loop and <x>_e at the end: port them as separate clips."""
+        out = [n for n in dict.fromkeys(names) if n in self.entries]
         for n in list(out):
             if n.endswith("_loop"):
                 for suffix in ("_s", "_e"):
@@ -139,6 +141,31 @@ class GameData:
                     if sib in self.entries and sib not in out:
                         out.append(sib)
         return sorted(out)
+
+    def mini_clips(self, chara_id: int, include_general: bool = False) -> list[str]:
+        """Same filter as UmaViewer's Animations > Mini list."""
+        out = []
+        for n in self.entries:
+            if not self._listed_mini_clip(n):
+                continue
+            if f"chara/chr{chara_id}" in n and "pose" not in n:
+                out.append(n)
+            elif include_general and self._general(n):
+                out.append(n)
+        return self.with_siblings(out)
+
+    def general_clips(self) -> list[str]:
+        """The Mini > General list as UmaViewer shows it (one entry per clip; _s/_e halves come with their _loop),
+        minus minigame background clips (/bg/), which move scenery rather than the character."""
+        return sorted(n for n in self.entries
+                      if self._listed_mini_clip(n) and self._general(n) and "/bg/" not in n)
+
+    def resolve_clip(self, name: str) -> str | None:
+        """Full bundle path of a General clip given its full path or just its name (anm_min_...)."""
+        if name in self.entries:
+            return name
+        name = name.strip().split("/")[-1]
+        return next((n for n in self.general_clips() if n.split("/")[-1] == name), None)
 
     def mini_body_prefab(self, chara_id: int, costume: str) -> str | None:
         cands = [f"3d/chara/mini/body/mbdy{chara_id}_{costume}/pfb_mbdy{chara_id}_{costume}",
@@ -150,3 +177,9 @@ class GameData:
             if catalog.MINI_RE.match(n):
                 return n
         return None
+
+
+def clip_category(path: str) -> str:
+    """3d/motion/mini/<category>/body/...  ->  <category> (circle, event, minigame, ...)."""
+    parts = path.split("/")
+    return parts[3] if len(parts) > 4 and parts[2] == "mini" else "other"

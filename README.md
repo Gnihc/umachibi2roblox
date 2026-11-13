@@ -80,6 +80,20 @@ clip in `ServerStorage.RBX_ANIMSAVES.<model>` and adds an `AnimationController`.
 **Animation Editor** to preview, tweak and *Publish to Roblox*. There's also an **Import Uma animations for
 selection** button, and **Port animations for converted** in the app for models you converted earlier.
 
+**General animations** (clips not tied to a character, UmaViewer's *Mini → General* list): every mini shares one
+skeleton, so they play on any model. Click **General animations…** in the app, search or filter by category
+(circle, event, minigame, mode, job) and click rows to pick them. Then either:
+* **Attach to next export**: they're ported with the next model you export (tick *Keep picks for every export*
+  to add them to every export), or
+* **Port now** onto a model you already converted.
+
+Each model remembers its General clips in its sidecar (`"generalClips"`), so re-porting it later keeps them.
+**Port animations for converted** adds the current picks to every converted model. From the command line:
+```
+Uma2Roblox.exe general cir_type00
+Uma2Roblox.exe anims Uma2Roblox_Export\Uma_1001_00_Special_Week.json --with anm_min_cir_type00_01_101
+```
+
 ## Setup (once)
 **Easiest, no Python needed:** download `Uma2Roblox-windows-x64.zip` from [Releases](../../releases), extract it
 anywhere (next to your UmaViewer folder lets it find UmaViewer without asking), run `install.bat` once for the

@@ -236,6 +236,167 @@ class OptionsDialog(tk.Toplevel):
         self.destroy()
 
 
+# --------------------------------------------------------------------------- general animations
+class GeneralDialog(tk.Toplevel):
+    """Pick Mini > General clips (not tied to a character). They ride along with the next export's animation
+    port, or are ported onto an already converted model right away. Each model remembers its General clips."""
+
+    def __init__(self, app: "App"):
+        super().__init__(app.root)
+        self.app = app
+        self.title("General mini animations")
+        self.geometry("620x560")
+        self.minsize(480, 400)
+        self.clips: list[str] = []
+        self.picked: set[str] = set(app.settings.get("general_picks", []))
+
+        f = ttk.Frame(self, padding=10)
+        f.pack(fill="both", expand=True)
+        ttk.Label(f, text="Animations not tied to a character. Every mini shares one skeleton, so any of these "
+                          "plays on any model. Click a row to pick it.", wraplength=590, justify="left"
+                  ).pack(anchor="w")
+        flt = ttk.Frame(f)
+        flt.pack(fill="x", pady=6)
+        ttk.Label(flt, text="Search").pack(side="left")
+        self.search = tk.StringVar()
+        self.search.trace_add("write", lambda *_: self.refresh())
+        ttk.Entry(flt, textvariable=self.search, width=24).pack(side="left", padx=6)
+        ttk.Label(flt, text="Category").pack(side="left", padx=(8, 0))
+        self.cat = tk.StringVar(value="All")
+        self.cat_box = ttk.Combobox(flt, textvariable=self.cat, values=["All"], state="readonly", width=12)
+        self.cat_box.pack(side="left", padx=6)
+        self.cat_box.bind("<<ComboboxSelected>>", lambda _e: self.refresh())
+        self.only_picked = tk.BooleanVar(value=False)
+        ttk.Checkbutton(flt, text="Picked only", variable=self.only_picked, command=self.refresh).pack(side="left")
+
+        bottom = ttk.Frame(f)
+        bottom.pack(side="bottom", fill="x", pady=(8, 0))
+        lst = ttk.Frame(f)
+        lst.pack(fill="both", expand=True)
+        cols = ("pick", "name", "category", "kind")
+        self.tree = ttk.Treeview(lst, columns=cols, show="headings", selectmode="browse")
+        for c, w, t in (("pick", 40, "✓"), ("name", 300, "Animation"), ("category", 90, "Category"),
+                        ("kind", 110, "Plays")):
+            self.tree.heading(c, text=t)
+            self.tree.column(c, width=w, anchor="center" if c == "pick" else "w", stretch=(c == "name"))
+        sb = ttk.Scrollbar(lst, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        self.tree.bind("<ButtonRelease-1>", self.click)
+        self.tree.bind("<space>", lambda _e: self.toggle(self.tree.focus()))
+        self.tree.tag_configure("picked", foreground="#1565c0")
+
+        row1 = ttk.Frame(bottom)
+        row1.pack(fill="x")
+        self.count = ttk.Label(row1, text="Loading…")
+        self.count.pack(side="left")
+        ttk.Button(row1, text="Clear picks", command=self.clear).pack(side="right")
+        self.keep = tk.BooleanVar(value=app.settings.get("general_keep", False))
+        ttk.Checkbutton(bottom, text="Keep picks for every export (otherwise they go with the next one only)",
+                        variable=self.keep).pack(anchor="w", pady=(6, 0))
+        row2 = ttk.Frame(bottom)
+        row2.pack(fill="x", pady=(6, 0))
+        ttk.Button(row2, text="Attach to next export", command=self.attach).pack(side="right")
+        row3 = ttk.Frame(bottom)
+        row3.pack(fill="x", pady=(8, 0))
+        ttk.Label(row3, text="Or port now onto converted model").pack(side="left")
+        self.models = app.converted_models()
+        self.target = tk.StringVar(value=self.models[0] if self.models else "")
+        ttk.Combobox(row3, textvariable=self.target, values=self.models, state="readonly", width=30
+                     ).pack(side="left", padx=6)
+        ttk.Button(row3, text="Port now", command=self.port_now,
+                   state="normal" if self.models else "disabled").pack(side="left")
+
+        self.transient(app.root)
+        self._result = None   # (clips, error) from the loader thread; Tk is only touched from the UI thread
+        threading.Thread(target=self._load, daemon=True).start()
+        self.after(100, self._poll)
+
+    def _load(self):
+        try:
+            self._result = (self.app.gamedata().general_clips(), None)
+        except Exception as ex:
+            self._result = ([], ex)
+
+    def _poll(self):
+        if self._result is None:
+            self.after(100, self._poll)
+        else:
+            self._loaded(*self._result)
+
+    def _loaded(self, clips, err):
+        if err is not None:
+            self.count.config(text=f"Could not read game data: {err}")
+            return
+        from .gamedata import clip_category
+        self.clips = clips
+        self.cat_box.config(values=["All"] + sorted({clip_category(n) for n in clips}))
+        self.refresh()
+
+    def refresh(self):
+        from .gamedata import clip_category
+        q = self.search.get().strip().lower()
+        cat = self.cat.get()
+        self.tree.delete(*self.tree.get_children())
+        for n in self.clips:
+            short = n.split("/")[-1]
+            if q and q not in short.lower():
+                continue
+            if cat != "All" and clip_category(n) != cat:
+                continue
+            on = n in self.picked
+            if self.only_picked.get() and not on:
+                continue
+            kind = "start, loop, end" if n.endswith("_loop") else "once"
+            self.tree.insert("", "end", iid=n, values=("✓" if on else "", short, clip_category(n), kind),
+                             tags=("picked",) if on else ())
+        self.count.config(text=f"{len(self.picked)} picked · {len(self.tree.get_children())} shown "
+                               f"of {len(self.clips)}")
+
+    def click(self, event):
+        if self.tree.identify_region(event.x, event.y) in ("cell", "tree"):
+            self.toggle(self.tree.identify_row(event.y))
+
+    def toggle(self, iid):
+        if not iid:
+            return
+        self.picked.symmetric_difference_update({iid})
+        on = iid in self.picked
+        self.tree.set(iid, "pick", "✓" if on else "")
+        self.tree.item(iid, tags=("picked",) if on else ())
+        self.count.config(text=f"{len(self.picked)} picked · {len(self.tree.get_children())} shown "
+                               f"of {len(self.clips)}")
+
+    def clear(self):
+        self.picked.clear()
+        self.refresh()
+
+    def _store(self):
+        self.app.settings["general_picks"] = sorted(self.picked)
+        self.app.settings["general_keep"] = self.keep.get()
+        self.app.save()
+        self.app.refresh_queue()
+
+    def attach(self):
+        self._store()
+        if self.picked:
+            self.app.log(f"{len(self.picked)} General animation(s) attached to the next export"
+                         + (" (and every one after)" if self.keep.get() else ""))
+        self.destroy()
+
+    def port_now(self):
+        if not self.picked:
+            messagebox.showinfo(APP, "Pick at least one animation first.", parent=self)
+            return
+        meta = os.path.join(self.app.out_dir(), self.target.get())
+        picks = sorted(self.picked)
+        self._store()
+        self.app.log(f"Porting {len(picks)} General animation(s) onto {self.target.get()[:-5]} …")
+        threading.Thread(target=lambda: self.app.port_animations(meta, extra=picks, consume=False),
+                         daemon=True).start()
+
+
 # --------------------------------------------------------------------------- main window
 class App:
     def __init__(self, root: tk.Tk):
@@ -329,6 +490,7 @@ class App:
         ttk.Button(bar, text="Open output folder", command=lambda: open_folder(self.out_dir())).pack(side="left")
         ttk.Button(bar, text="Reload characters", command=self.reload_characters).pack(side="left", padx=6)
         ttk.Button(bar, text="Port animations for converted", command=self.port_all_animations).pack(side="left")
+        ttk.Button(bar, text="General animations…", command=lambda: GeneralDialog(self)).pack(side="left", padx=6)
 
         # --- log (packed before the panes so it keeps its height)
         logf = ttk.Frame(self.root, padding=(10, 6, 10, 10))
@@ -508,6 +670,12 @@ class App:
         else:
             self.next_lbl.config(text="Queue is empty. Select characters on the left and add them, "
                                       "or just export any mini from UmaViewer: every export is converted.")
+        picks = self.settings.get("general_picks", [])
+        if picks:
+            names = ", ".join(p.split("/")[-1] for p in picks[:3]) + (f" +{len(picks) - 3} more" if len(picks) > 3 else "")
+            when = "every export" if self.settings.get("general_keep") else "the next export"
+            self.next_lbl.config(text=self.next_lbl.cget("text")
+                                 + f"\n\nGeneral animations going with {when}: {names}")
 
     # ---------------------------------------------------------------- actions
     # ---------------------------------------------------------------- animations
@@ -522,27 +690,43 @@ class App:
                 self._gamedata = (key, GameData(*key))
             return self._gamedata[1]
 
-    def port_animations(self, meta_path: str):
-        """Runs on the watcher thread."""
+    def converted_models(self) -> list[str]:
+        """Sidecar names (Uma_*.json) of the models in the output folder."""
+        d = self.out_dir()
+        return sorted(f for f in os.listdir(d) if f.startswith("Uma_") and f.endswith(".json")) \
+            if os.path.isdir(d) else []
+
+    def port_animations(self, meta_path: str, extra=None, consume=True) -> bool:
+        """Runs off the UI thread. extra: General clips to attach (default: the picks from General animations…);
+        consume: the picks were used, so clear them unless they are kept for every export."""
         from .anim import port_character_animations
         o = self.options()
+        picks = list(self.settings.get("general_picks", [])) if extra is None else list(extra)
         try:
             self.post("log", f"Porting mini animations for {os.path.basename(meta_path)[:-5]} …")
             port_character_animations(self.gamedata(), meta_path, o.general_animations, o.anim_fps,
-                                      log=lambda m: self.post("log", m), root_motion=o.root_motion)
+                                      log=lambda m: self.post("log", m), root_motion=o.root_motion,
+                                      extra_clips=picks)
         except Exception as ex:
             self.post("log", f"Animations skipped: {ex}")
+            return False
+        if picks and consume:
+            self.post("general_used", picks)
+        return True
 
     def port_all_animations(self):
-        metas = [os.path.join(self.out_dir(), f) for f in os.listdir(self.out_dir())
-                 if f.startswith("Uma_") and f.endswith(".json")] if os.path.isdir(self.out_dir()) else []
+        metas = [os.path.join(self.out_dir(), f) for f in self.converted_models()]
         if not metas:
             self.log("Nothing converted yet.")
             return
+        picks = list(self.settings.get("general_picks", []))
 
         def work():
+            ok = False
             for m in metas:
-                self.port_animations(m)
+                ok = self.port_animations(m, extra=picks, consume=False) or ok
+            if picks and ok:
+                self.post("general_used", picks)
         threading.Thread(target=work, daemon=True).start()
 
     def convert_file(self):
@@ -564,6 +748,14 @@ class App:
                     self.log(payload)
                 elif kind == "refresh":
                     self.refresh_list()
+                elif kind == "general_used":
+                    # picks travel with one export only, unless kept for every export
+                    if not self.settings.get("general_keep"):
+                        left = [p for p in self.settings.get("general_picks", []) if p not in payload]
+                        self.settings["general_picks"] = left
+                        self.save()
+                        self.log("General animations attached; the model keeps them when re-ported.")
+                        self.refresh_queue()
                 elif kind == "converted":
                     r = payload
                     self.log(f"✔ {os.path.basename(r.glb)}  —  {r.meshes} meshes, {r.triangles} tris, {r.bones} bones"

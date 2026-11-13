@@ -540,14 +540,30 @@ def retarget(skel: Skeleton, clip: Clip, meta: dict, ex: ExportPose, fps: float 
 
 
 def port_character_animations(gd, meta_path: str, include_general=False, fps=30.0, log=print,
-                              root_motion: str = "inplace") -> list[str]:
-    """Decode all mini clips for the character in a converted GLB's sidecar, write anim JSONs next to it."""
+                              root_motion: str = "inplace", extra_clips=None) -> list[str]:
+    """Decode all mini clips for the character in a converted GLB's sidecar, write anim JSONs next to it.
+
+    extra_clips: General clips (not tied to a character) to port onto this model too. They are remembered in
+    the sidecar ("generalClips"), so re-porting the model later keeps them."""
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
     cid, costume = meta["charaId"], meta["costume"]
     from .rig import build_skeleton
     skel = build_skeleton(gd, cid, costume, log)          # body + head prefabs (ear bones live on the head)
+    attached = []
+    for n in list(meta.get("generalClips") or []) + list(extra_clips or []):
+        full = gd.resolve_clip(n)
+        if full is None:
+            log(f"  general clip not found in game data, skipped: {n}")
+        elif full not in attached:
+            attached.append(full)
     names = gd.mini_clips(cid, include_general)
+    if attached:
+        meta["generalClips"] = attached
+        names = sorted(set(names) | set(gd.with_siblings(attached)))
+        log(f"  {len(attached)} General clip(s) attached to this model")
+    else:
+        meta.pop("generalClips", None)
     if not names:
         log(f"  no mini animations found for {cid}")
         return []
