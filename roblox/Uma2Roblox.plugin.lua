@@ -1,17 +1,20 @@
 --[[
 	Uma2Roblox Studio plugin
-	Install: Studio > Plugins tab > Plugins Folder, copy this file there, restart Studio.
+	Install: Studio > Plugins tab > Plugins Folder, copy this file there, then close and reopen the place.
 
-	After importing an Uma_<id>_<costume>_*.glb with File > Import 3D:
+	As soon as an Uma_<id>_<costume>_*.glb is imported with File > Import 3D, the plugin fits its RootPart,
+	fixes cheek/mayu transparency and imports its animations (each step has its option). Then:
 	  * select the imported model(s) and click "Apply Uma Toon"
 	      - CastShadow off on every MeshPart (no shadows from the model)
 	      - SmoothPlastic, no reflectance; the GLB's normals already point up, so Roblox
 	        lighting is uniform and the baked anime cel shading shows unchanged
 	      - outline hull parts made non-collidable / non-queryable
 	      - model turned to face Roblox's front (-Z) and scaled to the target height
+	      - RootPart fitted to the body (soles to top of head, head-wide), pivot at the soles
 	      - tagged with UmaCharaId / UmaCostume attributes
-	  * with "Also import its mini animations" on, Apply also builds KeyframeSequences from the
-	    animations the app ported, into ServerStorage.RBX_ANIMSAVES.<model> (Animation Editor)
+	  * with "Import its mini animations" on, import and Apply build KeyframeSequences from the
+	    animations the app ported, into the ServerStorage.RBX_ANIMSAVES folder linked to that rig
+	    (Animation Editor)
 	  * "Sync with Uma2Roblox app" tells the app which characters are now in this place,
 	    so its list only shows characters that still need porting.
 ]]
@@ -35,6 +38,12 @@ if cfg.autoTransparency == nil then
 end
 cfg.transparentParts = cfg.transparentParts or "cheek,mayu"
 cfg.rootMotionScale = cfg.rootMotionScale or 1
+if cfg.smoothBlinks == nil then
+	cfg.smoothBlinks = true
+end
+if cfg.fitOnImport == nil then
+	cfg.fitOnImport = true
+end
 local function saveSettings()
 	plugin:SetSetting(SETTINGS_KEY, cfg)
 end
@@ -141,6 +150,102 @@ local function faceFront(model)
 	end
 end
 
+-- The importer's RootPart is a big box around the whole scene, centred on the hip. Fit it to the body instead:
+-- from the soles to the top of the head, as wide and deep as the head (hair, ears and the arms' T-pose span
+-- left out), so the model is easy to grab, place and collide. Bones and joints hang off the RootPart, so their
+-- offsets are moved the other way: nothing else moves, and animations stay valid (a pure translation of the
+-- root; its rotation is kept). The pivot goes to the soles, so PivotTo puts the feet on the ground.
+local function isHeadPart(part) -- the mini face mesh is the whole head skin: mtl_mchr0001_00_face0
+	return string.match(string.lower(part.Name), "_face%d+$") ~= nil
+end
+
+local function isBodyPart(part)
+	return string.find(string.lower(part.Name), "bdy", 1, true) ~= nil
+end
+
+local function isHairPart(part)
+	return string.find(string.lower(part.Name), "hair", 1, true) ~= nil
+end
+
+local function fitRootToBody(model)
+	local rp = model.PrimaryPart or model:FindFirstChild("RootPart")
+	if not (rp and rp:IsA("BasePart")) then
+		return false
+	end
+	local rootCf = rp.CFrame
+	-- extents in root space of the parts that pass `keep` (box corners)
+	local function extents(keep)
+		local lo, hi = Vector3.one * math.huge, -Vector3.one * math.huge
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") and d ~= rp and not isOutline(d) and keep(d) then
+				local h = d.Size / 2
+				for _, sx in ipairs({ -1, 1 }) do
+					for _, sy in ipairs({ -1, 1 }) do
+						for _, sz in ipairs({ -1, 1 }) do
+							local p = rootCf:PointToObjectSpace(d.CFrame:PointToWorldSpace(h * Vector3.new(sx, sy, sz)))
+							lo, hi = lo:Min(p), hi:Max(p)
+						end
+					end
+				end
+			end
+		end
+		if lo.X == math.huge then
+			return nil
+		end
+		return lo, hi
+	end
+	-- everything but hair (and the outline hull, which is pushed out past the mesh)
+	local lo, hi = extents(function(d)
+		return not isHairPart(d)
+	end)
+	if not lo then
+		return false
+	end
+	local bodyLo = extents(isBodyPart)
+	local sole = bodyLo and bodyLo.Y or lo.Y
+	local headLo, headHi = extents(isHeadPart)
+	if not headLo then -- no head mesh found: the middle third of the model, full height
+		local w = hi - lo
+		headLo = Vector3.new(lo.X + w.X / 3, lo.Y, lo.Z + w.Z / 3)
+		headHi = Vector3.new(hi.X - w.X / 3, hi.Y, hi.Z - w.Z / 3)
+	end
+	local size = Vector3.new(headHi.X - headLo.X, headHi.Y - sole, headHi.Z - headLo.Z)
+	local center = Vector3.new((headLo.X + headHi.X) / 2, sole + size.Y / 2, (headLo.Z + headHi.Z) / 2)
+
+	local offset = CFrame.new(center)
+	local inv = offset:Inverse()
+	local oldPivot = model:GetPivot()
+	for _, c in ipairs(rp:GetChildren()) do
+		if c:IsA("Attachment") then -- includes Bones
+			c.CFrame = inv * c.CFrame
+		end
+	end
+	for _, j in ipairs(model:GetDescendants()) do
+		if j:IsA("JointInstance") then
+			if j.Part0 == rp then
+				j.C0 = inv * j.C0
+			end
+			if j.Part1 == rp then
+				j.C1 = inv * j.C1
+			end
+		end
+	end
+	rp.Size = size
+	rp.CFrame = rootCf * offset
+	-- the Animation Editor caches the old joint offsets here and would restore them; it rebuilds this folder
+	local cache = model:FindFirstChild("InitialPoses")
+	if cache then
+		cache:Destroy()
+	end
+	local newPivot = CFrame.new(rp.CFrame:PointToWorldSpace(Vector3.new(0, -size.Y / 2, 0))) * oldPivot.Rotation
+	if model.PrimaryPart == rp then
+		rp.PivotOffset = rp.CFrame:ToObjectSpace(newPivot)
+	else
+		model.WorldPivot = newPivot
+	end
+	return true
+end
+
 local function applyToon(model)
 	local id, costume = parseName(model.Name)
 	local count = 0
@@ -174,6 +279,9 @@ local function applyToon(model)
 	end
 
 	faceFront(model)
+	if fitRootToBody(model) then -- before scaling: the importer's big RootPart box would count in the height
+		model:SetAttribute("UmaRootFitted", true)
+	end
 
 	local h = model:GetExtentsSize().Y
 	if cfg.targetHeight > 0 and h > 0 then
@@ -483,18 +591,38 @@ local function animSaveFolder(model)
 		saves.Name = "RBX_ANIMSAVES"
 		saves.Parent = ServerStorage
 	end
-	-- The Animation Editor ties a save folder to its rig through the ObjectValue's Value, not its name:
-	-- copies of a rig share a name, so match on Value (the rig actually selected), never the first name match.
-	local orphan
+	-- The Animation Editor ties a save folder to its rig through the ObjectValue's Value, not its name: copies
+	-- and re-imports of a rig share a name, so the folder must point at THIS rig instance. In order:
+	--  1. the folder the Animation Editor already linked to the rig (rig.AnimSaves.Value -> folder)
+	--  2. a folder whose Value is this rig (the fullest one, if there are several)
+	--  3. a same-named folder whose rig is gone (Value nil, or an instance no longer in the place, e.g. the
+	--     rig was deleted or re-imported): re-pointed at this rig
+	--  4. a new folder
+	local function live(inst)
+		return inst ~= nil and inst:IsDescendantOf(game)
+	end
+	local link = model:FindFirstChild("AnimSaves")
+	local linked = link and link:IsA("ObjectValue") and link.Value
+	if linked and linked:IsA("ObjectValue") and linked.Parent == saves and (linked.Value == model or not live(linked.Value)) then
+		linked.Value = model
+		return linked
+	end
+	local mine, orphan
 	for _, child in ipairs(saves:GetChildren()) do
 		if child:IsA("ObjectValue") then
 			if child.Value == model then
-				return child
-			end
-			if not orphan and child.Value == nil and child.Name == model.Name then
-				orphan = child -- same-named folder whose rig was deleted: adopt it rather than add another
+				if not mine or #child:GetChildren() > #mine:GetChildren() then
+					mine = child
+				end
+			elseif child.Name == model.Name and not live(child.Value) then
+				if not orphan or #child:GetChildren() > #orphan:GetChildren() then
+					orphan = child
+				end
 			end
 		end
+	end
+	if mine then
+		return mine
 	end
 	if orphan then
 		orphan.Value = model
@@ -505,6 +633,114 @@ local function animSaveFolder(model)
 	holder.Value = model
 	holder.Parent = saves
 	return holder
+end
+
+-- Smooth out blinks: a jump straight between open and closed eyes gets one frame of an in-between sprite.
+-- Sprites are counted from 1 in the eye atlas' reading order (left to right, top to bottom), so bone
+-- Face_Eye_<side>_<nn> is sprite nn + 1. Sprites not listed (#4, #11 and the symbols #12-15) are never touched.
+local BLINK_OPEN = { 1, 2, 3, 5, 6, 7 }
+local BLINK_CLOSED = { 8, 9, 10 }
+local BLINK_BETWEEN = 3
+local EYE_SPRITES = 15
+
+local function asSet(list)
+	local s = {}
+	for _, v in ipairs(list) do
+		s[v] = true
+	end
+	return s
+end
+
+-- quaternions as { x, y, z, w }
+local function qmul(a, b)
+	return {
+		a[4] * b[1] + a[1] * b[4] + a[2] * b[3] - a[3] * b[2],
+		a[4] * b[2] - a[1] * b[3] + a[2] * b[4] + a[3] * b[1],
+		a[4] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[4],
+		a[4] * b[4] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+	}
+end
+local function qconj(a)
+	return { -a[1], -a[2], -a[3], a[4] }
+end
+local function qat(rot, f)
+	local i = f * 4
+	return { rot[i + 1], rot[i + 2], rot[i + 3], rot[i + 4] }
+end
+
+-- Face bones carry the head's rotation, times a 180-degree turn while toggled (see the app's face_tracks).
+-- Works on the app's data before the keyframes are built. Returns how many sprite changes were smoothed.
+local function smoothBlinks(anim, headName)
+	local data = {}
+	for _, b in ipairs(anim.bones) do
+		data[b.name] = b
+	end
+	local frames = anim.frames
+	local head = data[headName]
+	local function H(f)
+		return head and qat(head.rot, f) or { 0, 0, 0, 1 }
+	end
+	local function turned(entry, f) -- relative to the head, a turn of more than 90 degrees
+		return math.abs(qmul(qconj(H(f)), qat(entry.rot, f))[4]) < 0.7071
+	end
+	local open, closed = asSet(BLINK_OPEN), asSet(BLINK_CLOSED)
+	local smoothed = 0
+	for _, side in ipairs({ "L", "R" }) do
+		local bones = {}
+		for k = 0, EYE_SPRITES - 1 do
+			bones[k] = data[string.format("Face_Eye_%s_%02d", side, k)]
+		end
+		local between = bones[BLINK_BETWEEN - 1]
+		if bones[0] and between then
+			-- sprite shown on each frame (1-based; the first sprite rests on the face, the others turn out)
+			local shown, Q = {}, nil
+			for f = 0, frames - 1 do
+				local s = 1
+				for k = 0, EYE_SPRITES - 1 do
+					local e = bones[k]
+					if e and turned(e, f) then
+						Q = Q or qmul(qconj(H(f)), qat(e.rot, f)) -- the turn itself
+						if k > 0 then
+							s = k + 1
+						end
+					end
+				end
+				shown[f] = s
+			end
+			local new = table.clone(shown)
+			for f = 1, frames - 1 do
+				local a, b = shown[f - 1], shown[f]
+				if open[a] and closed[b] and f >= 2 and shown[f - 2] == a then
+					new[f - 1] = BLINK_BETWEEN -- closing: the last open frame half-closes
+				elseif closed[a] and open[b] and f + 1 < frames and shown[f + 1] == b then
+					new[f] = BLINK_BETWEEN -- opening: the first open frame is still half-closed
+				end
+			end
+			local changed = false
+			for f = 0, frames - 1 do
+				if new[f] ~= shown[f] then
+					changed = true
+					smoothed += 1
+				end
+			end
+			if changed and Q then
+				for k = 0, EYE_SPRITES - 1 do
+					local e = bones[k]
+					if e then
+						local rot = {}
+						for f = 0, frames - 1 do
+							local s = new[f]
+							local on = (k == 0 and s ~= 1) or (k > 0 and s == k + 1)
+							local q = on and qmul(H(f), Q) or H(f)
+							table.move(q, 1, 4, f * 4 + 1, rot)
+						end
+						e.rot = rot
+					end
+				end
+			end
+		end
+	end
+	return smoothed
 end
 
 local function importAnimations(model, report)
@@ -527,10 +763,15 @@ local function importAnimations(model, report)
 	local fit = fitSpace(index.skeleton, bonesByName)
 	local order = boneOrder(list)
 	local holder = animSaveFolder(model)
-	local n = 0
+	local eye = bonesByName["Face_Eye_L_00"]
+	local headName = eye and eye.Parent and eye.Parent.Name or "Head"
+	local n, blinks = 0, 0
 	for i, name in ipairs(index.animations) do
 		report(string.format("%s: animation %d/%d %s", source, i, #index.animations, name))
 		local anim = fetchJson("/anim?model=" .. HttpService:UrlEncode(source) .. "&name=" .. HttpService:UrlEncode(name))
+		if cfg.smoothBlinks then
+			blinks += smoothBlinks(anim, headName)
+		end
 		local ks = buildSequence(anim, fit, bonesByName, order, model:GetScale())
 		local old = holder:FindFirstChild(ks.Name)
 		if old then
@@ -539,7 +780,14 @@ local function importAnimations(model, report)
 		ks.Parent = holder
 		n += 1
 	end
-	return n
+	if blinks > 0 then
+		report(string.format("%s: smoothed %d blink frame(s)", source, blinks))
+	end
+	if holder.Value ~= model then -- never leave animations where the Animation Editor won't find them
+		warn(string.format("[Uma2Roblox] %s: save folder pointed elsewhere; re-linked it to this rig", model.Name))
+		holder.Value = model
+	end
+	return n, holder
 end
 
 local function scanPlace()
@@ -565,6 +813,70 @@ local function scanPlace()
 	end
 	return list
 end
+
+-- File > Import 3D drops the model into Workspace and fills it in over a few frames. Once it stops changing,
+-- set it up once (the UmaImportSetup attribute also travels with copies, so pasting one is left alone):
+-- fit its RootPart, fix cheek/mayu transparency and import its animations, each as its option says.
+local pendingSetup = {}
+local function onImportOptions()
+	return cfg.fitOnImport or cfg.autoTransparency or cfg.autoAnimations
+end
+local function setupWhenImported(model)
+	if pendingSetup[model] or not model:IsA("Model") or not parseName(model.Name) then
+		return
+	end
+	if model:GetAttribute("UmaImportSetup") ~= nil or model:GetAttribute("UmaToon") ~= nil then
+		return
+	end
+	pendingSetup[model] = true
+	task.spawn(function()
+		local last, stable, t0 = -1, 0, os.clock()
+		while stable < 3 and os.clock() - t0 < 15 and model.Parent do
+			task.wait(0.2)
+			local n = #model:GetDescendants()
+			if n == last then
+				stable += 1
+			else
+				stable, last = 0, n
+			end
+		end
+		pendingSetup[model] = nil
+		if not (onImportOptions() and model:IsDescendantOf(workspace) and model:GetAttribute("UmaImportSetup") == nil) then
+			return
+		end
+		local rp = model:FindFirstChild("RootPart")
+		if not (rp and rp:IsA("BasePart") and rp:FindFirstChildWhichIsA("Bone")) then
+			return -- not a rig from the importer
+		end
+		model:SetAttribute("UmaImportSetup", true)
+		local done = {}
+		record("Uma2Roblox: set up imported model", function()
+			if cfg.fitOnImport and model:GetAttribute("UmaRootFitted") == nil and fitRootToBody(model) then
+				model:SetAttribute("UmaRootFitted", true)
+				table.insert(done, "RootPart fitted")
+			end
+			if cfg.autoTransparency then
+				table.insert(done, fixTransparency(model) .. " cheek/mayu part(s) fixed")
+			end
+		end)
+		if cfg.autoAnimations then
+			record("Uma2Roblox: import animations", function()
+				local ok, n, holder = pcall(importAnimations, model, function() end)
+				if ok then
+					table.insert(done, string.format("%d animation(s) -> ServerStorage.RBX_ANIMSAVES.%s", n, holder and holder.Name or "?"))
+				else
+					warn("[Uma2Roblox] " .. model.Name .. ": animations not imported (is the Uma2Roblox app running?) " .. tostring(n))
+				end
+			end)
+		end
+		print("[Uma2Roblox] imported " .. model.Name .. ": " .. (#done > 0 and table.concat(done, ", ") or "nothing to do"))
+	end)
+end
+workspace.ChildAdded:Connect(function(child)
+	if onImportOptions() then
+		setupWhenImported(child)
+	end
+end)
 
 ---------------------------------------------------------------- UI
 local toolbar = plugin:CreateToolbar("Uma2Roblox")
@@ -681,6 +993,10 @@ numberRow("Target height (studs, 0 = keep)", cfg.targetHeight, function(n)
 	cfg.targetHeight = n
 	saveSettings()
 end)
+toggleRow("Fit RootPart to the body on import", cfg.fitOnImport, function(v)
+	cfg.fitOnImport = v
+	saveSettings()
+end)
 toggleRow("Extra Highlight silhouette outline", cfg.highlightOutline, function(v)
 	cfg.highlightOutline = v
 	saveSettings()
@@ -689,11 +1005,15 @@ numberRow("Root motion scale (hip movement, 1 = as in game)", cfg.rootMotionScal
 	cfg.rootMotionScale = math.max(0, n)
 	saveSettings()
 end)
-toggleRow("Also import its mini animations", cfg.autoAnimations, function(v)
+toggleRow("Import its mini animations (on import and Apply)", cfg.autoAnimations, function(v)
 	cfg.autoAnimations = v
 	saveSettings()
 end)
-toggleRow("Auto-fix cheek/mayu transparency (0.02)", cfg.autoTransparency, function(v)
+toggleRow("Smooth out blinks (sprite #3 between open and closed eyes)", cfg.smoothBlinks, function(v)
+	cfg.smoothBlinks = v
+	saveSettings()
+end)
+toggleRow("Fix cheek/mayu transparency (on import and Apply)", cfg.autoTransparency, function(v)
 	cfg.autoTransparency = v
 	saveSettings()
 end)
