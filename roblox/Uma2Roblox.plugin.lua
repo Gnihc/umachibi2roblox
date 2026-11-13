@@ -387,9 +387,13 @@ local function buildSequence(anim, fit, bonesByName, order, modelScale)
 			local localCf = base:ToObjectSpace(desired)
 			local skip = false
 			if d and d.constant then
-				-- face expression bones: instant swaps (Constant easing), and no key while nothing changes
+				-- face expression bones: instant 180-degree swaps (Constant easing), no key while nothing changes
 				local prev = lastLocal[bone]
-				skip = prev ~= nil and f < anim.frames - 1 and (prev.Position - localCf.Position).Magnitude < 1e-4
+				skip = prev ~= nil
+					and f < anim.frames - 1
+					and (prev.Position - localCf.Position).Magnitude < 1e-4
+					and prev.LookVector:Dot(localCf.LookVector) > 0.9999
+					and prev.UpVector:Dot(localCf.UpVector) > 0.9999
 				if not skip then
 					lastLocal[bone] = localCf
 				end

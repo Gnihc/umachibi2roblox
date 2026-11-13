@@ -471,8 +471,12 @@ def _face_part_of(kind: str):
 
 def _build_face_variants(prims, bone_pos, model, head, warnings):
     """Replace each face part by one mesh holding every expression variant. Variant k is a copy with its UVs
-    shifted to atlas cell k and skinned to its own bone Face_<part>_<k> (child of Head). Variant 0 sits on the
-    face; the others are baked inside the head. Animation shows a variant by moving it out (Constant keys)."""
+    shifted to atlas cell k and skinned to its own bone Face_<part>_<k> (child of Head).
+
+    Swapping is a pure rotation (scale-proof: Roblox scales animation translations with the model, never
+    rotations). Each bone sits halfway between the part on the face (F) and a point inside the head (C); a 180
+    degree turn about an axis through that pivot, perpendicular to F-C, maps F onto C and back. Variant 0 rests
+    on the face, the others rest turned inside the head; animation turns them (Constant keys)."""
     face_src = [p for p in prims if _face_part_of(p.kind)]
     if not face_src:
         return prims, bone_pos, {}
@@ -512,17 +516,30 @@ def _build_face_variants(prims, bone_pos, model, head, warnings):
         base_v = 0
         part_pos = np.concatenate([p.pos[np.unique(f)] for p, f in items])
         cen = part_pos.mean(0)
-        hide = (centre - cen) * 0.9          # vector from the face surface to inside the head
+        inside = cen + (centre - cen) * 0.9   # a point inside the head
+        pivot = (cen + inside) / 2
+        d = inside - cen
+        dn = d / (np.linalg.norm(d) + 1e-12)
+        up = np.array([0.0, 1.0, 0.0])
+        axis = up - up.dot(dn) * dn            # perpendicular to F-C, as vertical as possible
+        if np.linalg.norm(axis) < 1e-6:
+            axis = np.array([1.0, 0.0, 0.0]) - dn[0] * dn
+        axis /= np.linalg.norm(axis)
+        R180 = 2 * np.outer(axis, axis) - np.eye(3)   # rotation by 180 degrees about `axis`
         bone_ids = []
         for k in range(frames):
             bi = len(bone_pos) + len(new_bones)
-            new_bones.append((face_bone_name(part, k), cen))
+            new_bones.append((face_bone_name(part, k), pivot))
             bone_ids.append(bi)
             du, dv = 0.25 * (k % 4), rstep * (k // 4)
             for p, f in items:
                 used, inv = np.unique(f.reshape(-1), return_inverse=True)
-                pos = p.pos[used] + (0 if k == 0 else hide)
-                pos_l.append(pos); nrm_l.append(p.nrm[used])
+                if k == 0:
+                    pos, nrm = p.pos[used], p.nrm[used]
+                else:   # hidden at rest: turned 180 degrees about the pivot, into the head
+                    pos = (p.pos[used] - pivot) @ R180.T + pivot
+                    nrm = p.nrm[used] @ R180.T
+                pos_l.append(pos.astype(np.float32)); nrm_l.append(nrm.astype(np.float32))
                 uv_l.append(p.uv[used] + np.array([du, dv], np.float32))   # glTF v points down: +row step
                 jj = np.zeros((len(used), 4), np.int64); jj[:, 0] = bi
                 ww = np.zeros((len(used), 4), np.float32); ww[:, 0] = 1
@@ -534,7 +551,8 @@ def _build_face_variants(prims, bone_pos, model, head, warnings):
                     faces=np.concatenate(f_l).astype(np.int32), material=mat, alpha=items[0][0].alpha)
         out.append(np_)
         face_meta[part] = {"bones": [face_bone_name(part, k) for k in range(frames)], "frames": frames,
-                           "rowStep": rstep, "hide": [float(x) for x in hide]}
+                           "rowStep": rstep, "pivot": [float(x) for x in pivot], "axis": [float(x) for x in axis],
+                           "inside": [float(x) for x in inside]}
     for name, p in new_bones:
         model.bones.append(Bone(name, name, np.zeros(3, np.float32), head))
     if new_bones:

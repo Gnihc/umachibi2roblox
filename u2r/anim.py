@@ -457,21 +457,25 @@ def face_frames(clip: Clip, skel: Skeleton, face_meta: dict, times: np.ndarray):
 
 
 def face_tracks(frames: dict, face_meta: dict, head_rot: list | None, n: int) -> list:
-    """Constant-key bone tracks: the shown variant moves out of the head, variant 0 moves in when hidden."""
-    rot = head_rot if head_rot is not None else [0.0, 0.0, 0.0, 1.0] * n
+    """Constant-key bone tracks that swap expressions with a 180 degree turn (no translation, so model
+    scale never affects it): the shown variant turns out of the head, variant 0 turns in when not shown.
+    World delta of a variant bone = head delta * (180 degree turn about the part's axis, when toggled)."""
+    H = np.array(head_rot if head_rot is not None else [0.0, 0.0, 0.0, 1.0] * n, np.float64).reshape(-1, 4)
     bones = []
     for part, fr in frames.items():
         meta = face_meta[part]
-        hide = np.array(meta["hide"])
+        a = np.array(meta["axis"], np.float64)
+        Q = np.array([a[0], a[1], a[2], 0.0])          # 180 degrees about a
+        turned = qmul(H, np.broadcast_to(Q, H.shape))
         for k, name in enumerate(meta["bones"]):
-            shown = fr == k
-            if k == 0:
-                d = np.where(shown[:, None], 0.0, hide[None])      # rest: visible -> push in when not shown
-            else:
-                d = np.where(shown[:, None], -hide[None], 0.0)     # rest: hidden -> pull out when shown
-            if not np.any(d):
+            toggled = (fr != 0) if k == 0 else (fr == k)
+            if not toggled.any():
                 continue
-            bones.append({"name": name, "rot": rot, "dpos": np.round(d, 5).reshape(-1).tolist(), "constant": True})
+            q = np.where(toggled[:, None], turned, H)
+            for t in range(1, len(q)):                     # keep quaternion signs continuous
+                if np.dot(q[t], q[t - 1]) < 0:
+                    q[t] = -q[t]
+            bones.append({"name": name, "rot": np.round(q, 5).reshape(-1).tolist(), "constant": True})
     return bones
 
 

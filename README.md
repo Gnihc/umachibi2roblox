@@ -57,10 +57,11 @@ every conversion:
 * **Facial expressions** (no runtime script needed): with *Options → Face expression variants* on (default),
   the converter turns each face part (left/right eye, mouth, left/right mayu) into one mesh holding every
   expression of the atlas: eyes 15, mouth 19, mayu 9. Each variant is a copy with its UVs shifted to its atlas
-  cell and its own bone `Face_<part>_<nn>` under `Head`. Variant 0 sits on the face; the rest are baked inside the
-  head. Each body clip's `…/facial/…/<clip>_face` track becomes **Constant** keys that pull the shown variant out
-  and push the previous one in, so expressions swap instantly through the normal Animator and preview in the
-  Animation Editor. Keys are only written when an expression changes. The `_face` clips drive locators
+  cell and its own bone `Face_<part>_<nn>` under `Head`, placed halfway between the part on the face and a point
+  inside the head. Variant 0 rests on the face; the others rest turned 180° into the head. Each body clip's
+  `…/facial/…/<clip>_face` track becomes **Constant** keys that turn the shown variant out and the previous one in.
+  It's a pure rotation, so it's unaffected by `Model:ScaleTo` (Roblox scales animation translations, never
+  rotations). Expressions swap instantly through the normal Animator and preview in the Animation Editor. Keys are only written when an expression changes. The `_face` clips drive locators
   (`Gallop.DrivenKeyAnimation`): `Mouth_Ctrl`, `Eye_L_Ctrl`, `Eye_R_Ctrl`, `Mayu_L_Ctrl`, `Mayu_R_Ctrl` (and `Cheek_Ctrl`),
   whose local **x = −expression index ÷ 100**. One-frame interpolation blips between expressions are dropped.
   Material UV-offset channels are read as a fallback. If a clip uses channels the tool doesn't recognise, the log says
