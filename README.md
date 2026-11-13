@@ -1,7 +1,7 @@
 # Uma2Roblox: UmaViewer mini (chibi) models → Roblox Studio, cartoon-shaded
 
-Works with the **UmaViewer release app** at `C:\Users\Admin\Documents\Project\Umaviewer`
-(you can change this in the app). UmaViewer is not modified.
+Works with the standalone **[UmaViewer](https://github.com/katboi01/UmaViewer) release app**, wherever you
+keep it. UmaViewer is not modified, and its files are not included here.
 
 ```
 UmaViewer.exe ──Export Model (.pmx + Texture2D)──▶ Uma2Roblox.exe ──.glb──▶ Studio Import 3D ──▶ plugin "Apply Uma Toon"
@@ -10,12 +10,14 @@ UmaViewer.exe ──Export Model (.pmx + Texture2D)──▶ Uma2Roblox.exe ─�
 ```
 
 ## What it does
-* Reads `Umaviewer\Config.json` to find your game data, and lists every character that has a
+* Finds UmaViewer automatically if it's next to (or one level above) Uma2Roblox, or in your Documents,
+  Desktop or Downloads folder. Otherwise it asks for the folder containing `UmaViewer.exe` on first start
+  (you can change it anytime with **Browse…**). It then reads UmaViewer's `Config.json` to find your game data, and lists every character that has a
   **mini** model, read from `master.mdb` and `meta`. **Only not ported** is on by default.
 * You queue the characters you want. The app tells you which one to export next from UmaViewer.
 * It watches UmaViewer's default save folder (your game data folder), its own `inbox` folder and the
   UmaViewer folder. When a `.pmx` appears it moves it out, copies the textures it needs, and converts it to
-  `Uma_<id>_<costume>_<name>.glb` in the output folder (`Documents\Project\Uma2Roblox_Export` by default).
+  `Uma_<id>_<costume>_<name>.glb` in the output folder (`Documents\Uma2Roblox_Export` by default).
 * The Studio plugin applies the final settings and syncs back which characters are now in your place.
 
 ## The cartoon look (no Roblox-style shading)
@@ -54,6 +56,9 @@ clip in `ServerStorage.RBX_ANIMSAVES.<model>` and adds an `AnimationController`.
 selection** button, and **Port animations for converted** in the app for models you converted earlier.
 
 ## Setup (once)
+Download `umachibi2roblox.zip` from [Releases](../../releases) and extract it anywhere.
+Putting it next to your UmaViewer folder lets it find UmaViewer without asking.
+
 1. Install **Python 3.10+** from python.org (tick *Add to PATH*). The build installs numpy, Pillow,
    UnityPy and apsw-sqlite3mc.
 2. Double-click **`build_exe.bat`** → builds `Uma2Roblox.exe` in this folder.

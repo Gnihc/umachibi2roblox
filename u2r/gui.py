@@ -221,10 +221,14 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.settings = load_settings()
-        self.settings.setdefault("umaviewer_dir", catalog.DEFAULT_UMAVIEWER_DIR)
-        uv = self.settings["umaviewer_dir"]
-        self.settings.setdefault("game_dir", catalog.find_game_dir(uv))
-        self.settings.setdefault("out_dir", os.path.join(os.path.dirname(uv.rstrip("\\/")) or os.path.expanduser("~"), "Uma2Roblox_Export"))
+        # UmaViewer is standalone and can be anywhere: use the saved folder if still valid, else look for it
+        uv = self.settings.get("umaviewer_dir", "")
+        if not catalog.is_umaviewer_dir(uv):
+            uv = catalog.find_umaviewer_dir(uv)
+        self.settings["umaviewer_dir"] = uv
+        if not self.settings.get("game_dir") or not os.path.isdir(self.settings["game_dir"]):
+            self.settings["game_dir"] = catalog.find_game_dir(uv) if uv else ""
+        self.settings.setdefault("out_dir", catalog.default_output_dir())
         self.settings.setdefault("only_unported", True)
         self.events: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.registry = Registry()
@@ -248,6 +252,8 @@ class App:
         self.watcher.start()
         self.log("Watching for UmaViewer exports in:\n  " + "\n  ".join(self.watch_dirs()))
         root.after(200, self._pump)
+        if not self.settings["umaviewer_dir"]:
+            root.after(400, self.ask_umaviewer)
         root.protocol("WM_DELETE_WINDOW", self.close)
 
     # ---------------------------------------------------------------- settings helpers
@@ -366,6 +372,19 @@ class App:
         if p:
             self.path_vars[key].set(os.path.normpath(p))
             self.set_path(key, p)
+
+    def ask_umaviewer(self):
+        messagebox.showinfo(APP, "Where is UmaViewer?\n\nPick the folder that contains UmaViewer.exe "
+                                 "(it can be anywhere). Uma2Roblox reads its Config.json to find your game data.",
+                            parent=self.root)
+        p = filedialog.askdirectory(title="Folder containing UmaViewer.exe", parent=self.root)
+        if not p:
+            self.log("UmaViewer folder not set. Use 'Browse…' next to 'UmaViewer folder' when ready.")
+            return
+        if not catalog.is_umaviewer_dir(p):
+            self.log(f"Note: {p} doesn't contain UmaViewer.exe; using it anyway.")
+        self.path_vars["umaviewer_dir"].set(os.path.normpath(p))
+        self.set_path("umaviewer_dir", p)
 
     def set_path(self, key, value):
         value = os.path.normpath(value) if value else value

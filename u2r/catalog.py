@@ -5,8 +5,37 @@ import json
 import os
 import re
 import sqlite3
+import sys
 
-DEFAULT_UMAVIEWER_DIR = r"C:\Users\Admin\Documents\Project\Umaviewer"
+
+def is_umaviewer_dir(d: str) -> bool:
+    """UmaViewer is a standalone app: a folder with UmaViewer.exe (+ UmaViewer_Data, Config.json)."""
+    return bool(d) and (os.path.isfile(os.path.join(d, "UmaViewer.exe"))
+                        or os.path.isdir(os.path.join(d, "UmaViewer_Data"))
+                        or os.path.isfile(os.path.join(d, "Config.json")) and "MainPath" in read_umaviewer_config(d))
+
+
+def find_umaviewer_dir(hint: str = "") -> str:
+    """UmaViewer can live anywhere. Try the saved path, then next to / above this tool, then the
+    current folder and common places. Returns "" if not found (the app then asks for it)."""
+    here = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else sys.argv[0] or "."))
+    home = os.path.expanduser("~")
+    cands = [hint, here, os.path.dirname(here), os.getcwd()]
+    for base in (here, os.path.dirname(here), os.path.join(home, "Documents"), os.path.join(home, "Desktop"),
+                 os.path.join(home, "Downloads"), home):
+        try:
+            cands += [os.path.join(base, n) for n in os.listdir(base) if "umaviewer" in n.lower()]
+        except OSError:
+            pass
+    for c in cands:
+        if c and is_umaviewer_dir(c):
+            return os.path.normpath(c)
+    return ""
+
+
+def default_output_dir() -> str:
+    docs = os.path.join(os.path.expanduser("~"), "Documents")
+    return os.path.join(docs if os.path.isdir(docs) else os.path.expanduser("~"), "Uma2Roblox_Export")
 
 
 def read_umaviewer_config(umaviewer_dir: str) -> dict:

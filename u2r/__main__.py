@@ -16,12 +16,14 @@ def cli(argv):
     from .registry import Registry
 
     s = load_settings()
-    uv = s.get("umaviewer_dir", catalog.DEFAULT_UMAVIEWER_DIR)
+    uv = s.get("umaviewer_dir", "")
+    if not catalog.is_umaviewer_dir(uv):
+        uv = catalog.find_umaviewer_dir(uv)
     ap = argparse.ArgumentParser(prog="Uma2Roblox")
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("convert", help="convert UmaViewer PMX export(s) to Roblox GLB")
     c.add_argument("pmx", nargs="+")
-    c.add_argument("-o", "--out", default=s.get("out_dir") or os.path.join(os.path.dirname(uv), "Uma2Roblox_Export"))
+    c.add_argument("-o", "--out", default=s.get("out_dir") or catalog.default_output_dir())
     c.add_argument("--flat", action="store_true", help="no baked cel shadow")
     c.add_argument("--no-outline", action="store_true")
     an = sub.add_parser("anims", help="port mini animations for converted model(s) (their .json sidecars)")
