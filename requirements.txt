@@ -1,0 +1,4 @@
+numpy>=1.24
+pillow>=10.0
+UnityPy>=1.20
+apsw-sqlite3mc>=3.45

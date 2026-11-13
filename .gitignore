@@ -1,0 +1,29 @@
+# Python / build
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+Uma2Roblox.exe
+.venv/
+venv/
+
+# Never commit game-derived data or keys
+Uma2Roblox_Export/
+inbox/
+work/
+anims/
+Texture2D/
+*.pmx
+*.glb
+*.gltf
+*.vmd
+*.png
+*.jpg
+*.tga
+ported.json
+Config.json
+meta
+meta_umaviewer
+master.mdb
+*.zip
