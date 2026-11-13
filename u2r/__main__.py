@@ -31,11 +31,27 @@ def cli(argv):
     an.add_argument("--general", action="store_true", help="also General mini animations")
     an.add_argument("--fps", type=float, default=30.0)
     an.add_argument("--root-motion", choices=["inplace", "full", "none"], default="inplace")
+    ins = sub.add_parser("inspect", help="describe what mini clips animate (writes inspect_<x>.json)")
+    ins.add_argument("target", nargs="+", help="character id (e.g. 1001) or raw files from the game's dat folder")
+    ins.add_argument("--costume", default="00")
     l = sub.add_parser("list", help="list characters with mini models and their port status")
     l.add_argument("--game-dir", default=s.get("game_dir") or catalog.find_game_dir(uv))
     l.add_argument("--unported", action="store_true")
     a = ap.parse_args(argv)
 
+    if a.cmd == "inspect":
+        from .gamedata import GameData
+        from .inspect import inspect_character, inspect_files, write_report
+        gd = GameData(s.get("game_dir") or catalog.find_game_dir(uv), uv)
+        if len(a.target) == 1 and a.target[0].isdigit():
+            rep = inspect_character(gd, int(a.target[0]), a.costume)
+            out = write_report(rep, os.path.abspath(f"inspect_{a.target[0]}.json"))
+            print(f"{len(rep.get('bodyClips', []))} body clip(s), {len(rep.get('facialEntries', []))} facial entr(ies)")
+        else:
+            rep = inspect_files(gd, a.target)
+            out = write_report(rep, os.path.abspath("inspect_files.json"))
+        print("report written to", out)
+        return
     if a.cmd == "anims":
         from .anim import port_character_animations
         from .gamedata import GameData

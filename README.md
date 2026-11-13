@@ -103,6 +103,13 @@ Uma2Roblox.exe list --unported
 Uma2Roblox.exe anims Uma2Roblox_Export\Uma_1001_00_Special_Week.json
 ```
 
+**Diagnostics:** `inspect` writes a small JSON report of what a character's mini clips animate (body, `_face`,
+`_ear` and the `_driven` variants): bone/renderer names, channel ids and sample values. It contains no asset data.
+```
+py -3 uma2roblox.py inspect 1001
+py -3 uma2roblox.py inspect "<game data>\dat\AB\ABCDEF…"   (raw files from the dat folder)
+```
+
 ## Notes
 * UmaViewer plays an idle animation on minis, and the export is taken from the pose on screen.
   That pose becomes the rest pose in Roblox, so pause or pose the model first if you care about it.
