@@ -68,7 +68,9 @@ every conversion:
 * **Root motion** (*Options → Root motion*): mini clips also move and turn the root `Position` bone through
   the game scene. **inplace** (default) freezes it so the rig stays where it is and keeps only the hip's
   bob and sway, which is what Roblox animations expect. **full** keeps the scene movement, and **none** removes all
-  translation. Fine-tune the hip movement in Studio with the plugin's **Root motion scale** (1 = as in game)
+  translation. Fine-tune the hip movement in Studio with the plugin's **Root motion scale** (1 = as in game).
+  Animations are stored in the model's unscaled units (Roblox's Animator scales them by `Model:GetScale()`), so
+  they stay correct at any `Model:ScaleTo` size, including if you rescale the rig after importing them
 
 In Studio, **Apply Uma Toon** then imports them automatically: it fits the bones, builds a `KeyframeSequence` per
 clip in `ServerStorage.RBX_ANIMSAVES.<model>` and adds an `AnimationController`. Open them in the

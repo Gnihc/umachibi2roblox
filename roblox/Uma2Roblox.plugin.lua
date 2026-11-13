@@ -312,7 +312,11 @@ local function boneOrder(list)
 	return list
 end
 
-local function buildSequence(anim, fit, bonesByName, order)
+-- Roblox's Animator multiplies pose translations by the model's scale (Model:ScaleTo / GetScale), so poses
+-- must hold *unscaled* offsets. Dividing by the scale at build time makes the same KeyframeSequence correct
+-- at any model scale, including if the model is rescaled later.
+local function buildSequence(anim, fit, bonesByName, order, modelScale)
+	modelScale = (modelScale and modelScale > 0) and modelScale or 1
 	local data = {}
 	for _, b in ipairs(anim.bones) do
 		data[b.name] = b
@@ -393,7 +397,7 @@ local function buildSequence(anim, fit, bonesByName, order)
 			if needed[bone] and not skip then
 				local pose = Instance.new("Pose")
 				pose.Name = bone.Name
-				pose.CFrame = localCf
+				pose.CFrame = CFrame.new(localCf.Position / modelScale) * localCf.Rotation
 				if d and d.constant then
 					pose.EasingStyle = Enum.PoseEasingStyle.Constant
 				end
@@ -461,7 +465,7 @@ local function importAnimations(model, report)
 	for i, name in ipairs(index.animations) do
 		report(string.format("%s: animation %d/%d %s", source, i, #index.animations, name))
 		local anim = fetchJson("/anim?model=" .. HttpService:UrlEncode(source) .. "&name=" .. HttpService:UrlEncode(name))
-		local ks = buildSequence(anim, fit, bonesByName, order)
+		local ks = buildSequence(anim, fit, bonesByName, order, model:GetScale())
 		local old = holder:FindFirstChild(ks.Name)
 		if old then
 			old:Destroy()
