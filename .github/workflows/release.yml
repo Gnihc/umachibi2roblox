@@ -1,0 +1,80 @@
+name: Windows release
+
+# Builds Uma2Roblox.exe (app) and Uma2Roblox-cli.exe (command line) on Windows, smoke-tests them,
+# and publishes Uma2Roblox-windows-x64.zip as a GitHub release.
+# Run it from the Actions tab ("Run workflow", enter a tag such as v1.0.1) or by pushing a v* tag.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.0.1"
+        required: true
+        default: "v1.0.0"
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip -r requirements.txt pyinstaller
+
+      - name: Tests
+        run: |
+          python tests/test_anim.py
+          python tests/test_pipeline.py
+          python tests/test_ears.py
+          python tests/test_face.py
+
+      - name: Build app (no console)
+        run: pyinstaller --noconfirm --onefile --windowed --collect-all UnityPy --collect-all apsw --name Uma2Roblox uma2roblox.py
+
+      - name: Build command-line tool
+        run: pyinstaller --noconfirm --onefile --console --collect-all UnityPy --collect-all apsw --name Uma2Roblox-cli uma2roblox.py
+
+      - name: Smoke-test the built exe
+        shell: pwsh
+        run: |
+          dist\Uma2Roblox-cli.exe selftest
+          if ($LASTEXITCODE -ne 0) { throw "selftest failed" }
+          python tests/make_test_pmx.py smoke
+          dist\Uma2Roblox-cli.exe convert "smoke\1001_Special Week.pmx" -o smoke\out
+          if (!(Test-Path "smoke\out\Uma_1001_00_Special_Week.glb")) { throw "convert produced no GLB" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $pkg = "Uma2Roblox"
+          New-Item -ItemType Directory -Force -Path "$pkg\roblox" | Out-Null
+          Copy-Item dist\Uma2Roblox.exe, dist\Uma2Roblox-cli.exe $pkg
+          Copy-Item roblox\Uma2Roblox.plugin.lua "$pkg\roblox"
+          Copy-Item install.bat, install.ps1, README.md, LICENSE, NOTICE.md $pkg
+          Compress-Archive -Path $pkg -DestinationPath Uma2Roblox-windows-x64.zip -Force
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          body: |
+            **Download `Uma2Roblox-windows-x64.zip`**, extract it anywhere (next to your UmaViewer folder is handy),
+            run `install.bat` once for the Roblox Studio plugin, then start `Uma2Roblox.exe`. No Python needed.
+
+            `Uma2Roblox-cli.exe` is the same tool for the command line (`inspect`, `convert`, `list`, `anims`).
+
+            Contains no game assets, UmaViewer files or keys. See NOTICE.md.
+          files: Uma2Roblox-windows-x64.zip

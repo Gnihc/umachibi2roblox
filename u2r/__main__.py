@@ -94,7 +94,18 @@ def cli(argv):
             print(f"{cid}\t{name}\t{'?' if cos is None else ','.join(cos)}\t{st}")
 
 
+def selftest() -> int:
+    """Used by the release build: check the frozen exe can load every dependency."""
+    import numpy, PIL, UnityPy, apsw
+    from . import __version__
+    print(f"Uma2Roblox {__version__}: numpy {numpy.__version__}, Pillow {PIL.__version__}, "
+          f"UnityPy {UnityPy.__version__}, sqlite3mc {apsw.sqlite_lib_version()}")
+    return 0
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "selftest":
+        sys.exit(selftest())
     if len(sys.argv) > 1:
         cli(sys.argv[1:])
     else:

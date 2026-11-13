@@ -81,9 +81,11 @@ clip in `ServerStorage.RBX_ANIMSAVES.<model>` and adds an `AnimationController`.
 selection** button, and **Port animations for converted** in the app for models you converted earlier.
 
 ## Setup (once)
-Download `umachibi2roblox.zip` from [Releases](../../releases) and extract it anywhere.
-Putting it next to your UmaViewer folder lets it find UmaViewer without asking.
+**Easiest, no Python needed:** download `Uma2Roblox-windows-x64.zip` from [Releases](../../releases), extract it
+anywhere (next to your UmaViewer folder lets it find UmaViewer without asking), run `install.bat` once for the
+Studio plugin, then start `Uma2Roblox.exe`. `Uma2Roblox-cli.exe` is the command-line version (`inspect`, `convert`, …).
 
+**From source:**
 1. Install **Python 3.10+** from python.org (tick *Add to PATH*). The build installs numpy, Pillow,
    UnityPy and apsw-sqlite3mc.
 2. Double-click **`build_exe.bat`** → builds `Uma2Roblox.exe` in this folder.
