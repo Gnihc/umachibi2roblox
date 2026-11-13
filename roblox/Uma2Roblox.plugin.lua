@@ -339,6 +339,7 @@ local function buildSequence(anim, fit, bonesByName, order)
 	-- <x>_s (start) and <x>_e (end) are one-shot Action tracks; <x>_loop is a looping Idle track
 	ks.Priority = anim.loop and Enum.AnimationPriority.Idle or Enum.AnimationPriority.Action
 	local R, Rinv = fit.R, fit.R:Inverse()
+	local lastLocal = {} -- constant (face) bones: only key frames where they change
 	for f = 0, anim.frames - 1 do
 		local kf = Instance.new("Keyframe")
 		kf.Time = f / anim.fps
@@ -367,7 +368,8 @@ local function buildSequence(anim, fit, bonesByName, order)
 				if d.dpos then
 					local pi = f * 3
 					local dv = R:VectorToWorldSpace(
-						Vector3.new(d.dpos[pi + 1], d.dpos[pi + 2], d.dpos[pi + 3]) * (fit.s * cfg.rootMotionScale)
+						Vector3.new(d.dpos[pi + 1], d.dpos[pi + 2], d.dpos[pi + 3])
+							* (fit.s * (d.constant and 1 or cfg.rootMotionScale))
 					)
 					if parent:IsA("Bone") then
 						local parentDelta = worldAt[parent].Rotation * restWorld[parent].Rotation:Inverse()
@@ -378,10 +380,23 @@ local function buildSequence(anim, fit, bonesByName, order)
 				desired = CFrame.new(pos) * rot
 			end
 			worldAt[bone] = desired
-			if needed[bone] then
+			local localCf = base:ToObjectSpace(desired)
+			local skip = false
+			if d and d.constant then
+				-- face expression bones: instant swaps (Constant easing), and no key while nothing changes
+				local prev = lastLocal[bone]
+				skip = prev ~= nil and f < anim.frames - 1 and (prev.Position - localCf.Position).Magnitude < 1e-4
+				if not skip then
+					lastLocal[bone] = localCf
+				end
+			end
+			if needed[bone] and not skip then
 				local pose = Instance.new("Pose")
 				pose.Name = bone.Name
-				pose.CFrame = base:ToObjectSpace(desired)
+				pose.CFrame = localCf
+				if d and d.constant then
+					pose.EasingStyle = Enum.PoseEasingStyle.Constant
+				end
 				local parentPose = poseOf[parent]
 				if not parentPose then
 					parentPose = partPoses[parent]

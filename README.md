@@ -54,6 +54,15 @@ every conversion:
   `Ear*` bones, so with *Options → Ear bones from game rig* on (default) the converter takes the ear bones from the
   mini head/hair prefab in your game data, adds them under `Head` in the GLB, and skins the ear part of the hair to
   them (geometric weights that blend into the head at the ear base). Mini clips have no tail motion.
+* **Facial expressions** (no runtime script needed): with *Options → Face expression variants* on (default),
+  the converter turns each face part (left/right eye, mouth, left/right mayu) into one mesh holding every
+  expression of the atlas: eyes 15, mouth 19, mayu 9. Each variant is a copy with its UVs shifted to its atlas
+  cell and its own bone `Face_<part>_<nn>` under `Head`. Variant 0 sits on the face; the rest are baked inside the
+  head. Each body clip's `…/facial/…/<clip>_face` track becomes **Constant** keys that pull the shown variant out
+  and push the previous one in, so expressions swap instantly through the normal Animator and preview in the
+  Animation Editor. Keys are only written when an expression changes. The tool reads the face shaders'
+  material channels (`_MainTex_ST` offset for mouth/mayu, `_UVOffset` for the eyes). If a clip uses channels it
+  doesn't recognise, the log says so and writes `anims\<model>\_face_channels.json` for you to report.
 * **Root motion** (*Options → Root motion*): mini clips also move and turn the root `Position` bone through
   the game scene. **inplace** (default) freezes it so the rig stays where it is and keeps only the hip's
   bob and sway, which is what Roblox animations expect. **full** keeps the scene movement, and **none** removes all

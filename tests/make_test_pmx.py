@@ -44,18 +44,30 @@ def main(out_dir, facing=-1):
     ck.save(os.path.join(T, "tex_mchr0001_00_cheek0.png"))
     my = Image.new("RGB", (64, 64), (180, 180, 180)); ImageDraw.Draw(my).line((6, 40, 30, 28, 58, 34), fill=(70, 40, 30), width=5)
     my.save(os.path.join(T, "tex_mchr1001_00_mayu.png"))
-    eye.save(os.path.join(T, "tex_mchr0001_00_eye0_all.png")); eye.crop((0, 0, 64, 256)).save(os.path.join(T, "tex_mchr0001_00_eye0.png"))
+    eye.save(os.path.join(T, "tex_mchr0001_00_eye0_all.png"))
+    mo = Image.new("RGBA", (128, 256), (0, 0, 0, 0)); ImageDraw.Draw(mo).line((6, 20, 26, 22), fill=(120, 30, 40, 255), width=3)
+    mo.save(os.path.join(T, "tex_mchr0001_00_mouth.png")); eye.crop((0, 0, 64, 256)).save(os.path.join(T, "tex_mchr0001_00_eye0.png"))
 
     # geometry in PMX units (UmaViewer: unity * 12.5, x/z negated). 'facing' = PMX z of the face.
     bv, bn, buv, bf = uv_sphere(0, 4, 0, 2.5)               # body
     hv, hn, huv, hf = uv_sphere(0, 9, 0, 3.2)               # head (hair material)
-    ev = np.array([[-1, 9.5, 3.15 * facing], [1, 9.5, 3.15 * facing], [-1, 8.5, 3.15 * facing], [1, 8.5, 3.15 * facing]])
-    en = np.tile([0, 0, facing], (4, 1)); euv = np.array([[0, 0], [.25, 0], [0, .125], [.25, .125]]); ef = np.array([[0, 1, 2], [1, 3, 2]])
-    cv = ev + np.array([0, -1.6, 0.02 * facing]); mv = ev + np.array([0, 1.2, 0.02 * facing])
+    # two eyes (one mesh, like the mini M_Eye), each a quad mapped to the first atlas cell
+    ev = np.array([[-2, 9.5, 3.15 * facing], [-0.5, 9.5, 3.15 * facing], [-2, 8.5, 3.15 * facing], [-0.5, 8.5, 3.15 * facing],
+                   [0.5, 9.5, 3.15 * facing], [2, 9.5, 3.15 * facing], [0.5, 8.5, 3.15 * facing], [2, 8.5, 3.15 * facing]])
+    en = np.tile([0, 0, facing], (8, 1))
+    euv = np.array([[0, 0], [.25, 0], [0, .125], [.25, .125]] * 2)
+    ef = np.array([[0, 1, 2], [1, 3, 2], [4, 5, 6], [5, 7, 6]])
+    q4 = np.array([[0, 1, 2], [1, 3, 2]])
+    cv = ev[:4] + np.array([0, -1.6, 0.02 * facing]); mv = ev[4:] + np.array([0, 1.2, 0.02 * facing])
+    ov = np.array([[-0.5, 7.6, 3.1 * facing], [0.5, 7.6, 3.1 * facing], [-0.5, 7.2, 3.1 * facing], [0.5, 7.2, 3.1 * facing]])  # mouth
     quv = np.array([[0, 0], [1, 0], [0, 1], [1, 1]])
-    V = np.concatenate([bv, hv, ev, cv, mv]); N = np.concatenate([bn, hn, en, en, en]); UV = np.concatenate([buv, huv, euv, quv, quv])
+    muv = np.array([[0, 0], [.25, 0], [0, .125], [.25, .125]])
+    e4 = en[:4]
+    V = np.concatenate([bv, hv, ev, cv, mv, ov]); N = np.concatenate([bn, hn, en, e4, e4, e4])
+    UV = np.concatenate([buv, huv, euv, quv, quv, muv])
     nb, nh = len(bv), len(hv)
-    F = np.concatenate([bf, hf + nb, ef + nb + nh, ef + nb + nh + 4, ef + nb + nh + 8])
+    o = nb + nh
+    F = np.concatenate([bf, hf + nb, ef + o, q4 + o + 8, q4 + o + 12, q4 + o + 16])
     # bones: 0 Position, 1 Hip, 2 Spine, 3 Head, 4 unused leaf, 5 Tail(unused)
     bones = [("センター", "Position", (0, 0, 0), -1), ("グルーブ", "Hip", (0, 3, 0), 0), ("上半身", "Spine", (0, 5, 0), 1),
              ("頭", "Head", (0, 7, 0), 2), ("Unused", "Unused", (0, 12, 0), 3), ("Tail", "Tail", (0, 3, -2), 1)]
@@ -74,10 +86,10 @@ def main(out_dir, facing=-1):
         out += struct.pack("<f", 1.0)
     out += struct.pack("<i", F.size) + F.astype("<u2").tobytes()
     texs = ["Texture2D/tex_mbdy1001_00_diff.png", "Texture2D/tex_mchr1001_00_hair_diff.png", "Texture2D/tex_mchr0001_00_eye0.png",
-            "Texture2D/tex_mchr0001_00_cheek0.png", "Texture2D/tex_mchr1001_00_mayu.png"]
+            "Texture2D/tex_mchr0001_00_cheek0.png", "Texture2D/tex_mchr1001_00_mayu.png", "Texture2D/tex_mchr0001_00_mouth.png"]
     out += struct.pack("<i", len(texs)) + b"".join(s(t) for t in texs)
     mats = [("mtl_mbdy1001_00", 0, bf.size), ("mtl_mchr1001_00_hair", 1, hf.size), ("M_Eye", 2, ef.size),
-            ("M_Cheek", 3, ef.size), ("M_Mayu_L", 4, ef.size)]
+            ("M_Cheek", 3, q4.size), ("M_Mayu_L", 4, q4.size), ("M_Mouth", 5, q4.size)]
     out += struct.pack("<i", len(mats))
     for name, tex, cnt in mats:
         out += s(name) + s(name) + struct.pack("<4f3ff3f", 1, 1, 1, 1, 0, 0, 0, 5, .5, .5, .5) + bytes([0x0E])

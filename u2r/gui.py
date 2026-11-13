@@ -155,6 +155,7 @@ class OptionsDialog(tk.Toplevel):
             "anim_fps": tk.DoubleVar(value=o.anim_fps),
             "root_motion": tk.StringVar(value=o.root_motion),
             "ear_bones": tk.BooleanVar(value=o.ear_bones),
+            "face_variants": tk.BooleanVar(value=o.face_variants),
             "outline_exclude": tk.StringVar(value=o.outline_exclude),
             "cel_exclude": tk.StringVar(value=o.cel_exclude),
         }
@@ -183,6 +184,7 @@ class OptionsDialog(tk.Toplevel):
         row("Prune unused bones", ttk.Checkbutton(f, variable=self.v["prune_bones"]))
         row("Key out background (no alpha)", ttk.Entry(f, textvariable=self.v["colorkey_parts"], width=34))
         row("Ear bones from game rig (for ear motion)", ttk.Checkbutton(f, variable=self.v["ear_bones"]))
+        row("Face expression variants (eyes/mouth/mayu)", ttk.Checkbutton(f, variable=self.v["face_variants"]))
         row("Port mini animations", ttk.Checkbutton(f, variable=self.v["port_animations"]))
         row("  …include General mini animations", ttk.Checkbutton(f, variable=self.v["general_animations"]))
         row("  Animation keyframes per second", ttk.Combobox(f, textvariable=self.v["anim_fps"], values=[10, 15, 20, 30], width=10))
@@ -222,6 +224,7 @@ class OptionsDialog(tk.Toplevel):
                 "anim_fps": float(self.v["anim_fps"].get()),
                 "root_motion": self.v["root_motion"].get(),
                 "ear_bones": self.v["ear_bones"].get(),
+                "face_variants": self.v["face_variants"].get(),
                 "outline_exclude": self.v["outline_exclude"].get(),
                 "cel_exclude": self.v["cel_exclude"].get(),
             }

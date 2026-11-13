@@ -143,6 +143,9 @@ class Clip:
     loop: bool
     # curve evaluators per (path_hash, attribute) -> callable(times) -> (T, k)
     tracks: dict
+    # non-Transform channels (material properties, script fields, ...): dicts with path, attribute,
+    # typeID, customType and f (callable(times) -> values)
+    other: list = field(default_factory=list)
 
 
 def _get(d, *keys, default=None):
@@ -234,8 +237,13 @@ def decode_clip(tt: dict, name: str | None = None) -> Clip:
 
     bindings = _get(tt, "m_ClipBindingConstant", "genericBindings") or []
     tracks = {}
+    other = []
     for b, (start, k) in zip(bindings, _curve_counts(bindings)):
         if b.get("typeID") != 4 or b.get("attribute") not in (1, 2, 3, 4):
+            if not b.get("isPPtrCurve"):
+                other.append({"path": int(b.get("path", 0)) & 0xFFFFFFFF, "attribute": int(b.get("attribute", 0)) & 0xFFFFFFFF,
+                              "typeID": int(b.get("typeID", 0)), "customType": int(b.get("customType", 0)),
+                              "f": curve(start)})
             continue
         fs = [curve(start + i) for i in range(k)]
         tracks[(int(b["path"]) & 0xFFFFFFFF, int(b["attribute"]))] = (lambda fs: lambda T: np.stack([f(T) for f in fs], -1))(fs)
@@ -244,7 +252,7 @@ def decode_clip(tt: dict, name: str | None = None) -> Clip:
     stop_t = float(muscle.get("m_StopTime", 0) or 0)
     nm = name or tt.get("m_Name", "clip")
     return Clip(nm, max(0.0, stop_t - start_t), float(tt.get("m_SampleRate", 30) or 30),
-                nm.endswith("_loop"), tracks)
+                nm.endswith("_loop"), tracks, other)
 
 
 # ------------------------------------------------------------------------- FK
@@ -355,6 +363,77 @@ def ear_clip_name(body_clip: str) -> str:
     return body_clip.replace("/body/", "/facial/", 1) + "_ear"
 
 
+def face_clip_name(body_clip: str) -> str:
+    return body_clip.replace("/body/", "/facial/", 1) + "_face"
+
+
+# material channels the mini face shaders animate (Unity binds material properties as "material.<prop>.<c>")
+_FACE_ATTRS = {}
+for _prop in ("_MainTex_ST", "_UVOffset"):
+    for _c in "xyzw":
+        for _fmt in ("material.{p}.{c}", "{p}.{c}"):
+            _FACE_ATTRS[path_hash(_fmt.format(p=_prop, c=_c))] = (_prop, _c)
+
+# renderer -> (part, property, x component, y component); M_Eye's shader has one offset per eye
+_FACE_RENDERERS = {
+    "M_Mouth": [("Mouth", "_MainTex_ST", "z", "w")],
+    "M_Mayu_L": [("Mayu_L", "_MainTex_ST", "z", "w")],
+    "M_Mayu_R": [("Mayu_R", "_MainTex_ST", "z", "w")],
+    "M_Eye": [("Eye_R", "_UVOffset", "x", "y"), ("Eye_L", "_UVOffset", "z", "w")],
+}
+
+
+def face_frames(clip: Clip, skel: Skeleton, face_meta: dict, times: np.ndarray):
+    """-> ({part: frame index per sample}, diagnostics list). Frame = row * 4 + column of the atlas cell."""
+    chans = {}
+    diag = []
+    for o in clip.other:
+        bi = skel.by_hash.get(o["path"])
+        rname = skel.names[bi] if bi is not None else None
+        attr = _FACE_ATTRS.get(o["attribute"])
+        v = o["f"](times)
+        if rname in _FACE_RENDERERS and attr:
+            chans[(rname, attr[0], attr[1])] = v
+        else:
+            diag.append({"renderer": rname or f"hash:{o['path']:08x}", "attribute": f"{o['attribute']:08x}",
+                         "typeID": o["typeID"], "customType": o["customType"],
+                         "min": float(np.min(v)), "max": float(np.max(v))})
+    out = {}
+    for rname, specs in _FACE_RENDERERS.items():
+        for part, prop, cx, cy in specs:
+            if part not in face_meta:
+                continue
+            x, y = chans.get((rname, prop, cx)), chans.get((rname, prop, cy))
+            if x is None and y is None:
+                continue
+            x = np.zeros_like(times) if x is None else x
+            y = np.zeros_like(times) if y is None else y
+            rstep = face_meta[part]["rowStep"]
+            col = np.mod(np.rint(x / 0.25).astype(int), 4)
+            row = np.maximum(np.rint(-y / rstep).astype(int), 0)
+            out[part] = np.clip(row * 4 + col, 0, face_meta[part]["frames"] - 1)
+    return out, diag
+
+
+def face_tracks(frames: dict, face_meta: dict, head_rot: list | None, n: int) -> list:
+    """Constant-key bone tracks: the shown variant moves out of the head, variant 0 moves in when hidden."""
+    rot = head_rot if head_rot is not None else [0.0, 0.0, 0.0, 1.0] * n
+    bones = []
+    for part, fr in frames.items():
+        meta = face_meta[part]
+        hide = np.array(meta["hide"])
+        for k, name in enumerate(meta["bones"]):
+            shown = fr == k
+            if k == 0:
+                d = np.where(shown[:, None], 0.0, hide[None])      # rest: visible -> push in when not shown
+            else:
+                d = np.where(shown[:, None], -hide[None], 0.0)     # rest: hidden -> pull out when shown
+            if not np.any(d):
+                continue
+            bones.append({"name": name, "rot": rot, "dpos": np.round(d, 5).reshape(-1).tolist(), "constant": True})
+    return bones
+
+
 ROOT_BONE = "Position"          # carries the chibi's movement through the scene in the game
 TRANSLATING_BONES = ("Position", "Hip")
 
@@ -447,6 +526,12 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
                         with_ears += 1
                 except Exception as ex:
                     log(f"  ear clip {ear_name.split('/')[-1]} skipped: {ex}")
+            fc_name = face_clip_name(n)
+            if fc_name in gd.entries:
+                try:
+                    c.face = load_clip(fc_name)
+                except Exception as ex:
+                    log(f"  face clip {fc_name.split('/')[-1]} skipped: {ex}")
             clips.append(c)
         except Exception as ex:
             log(f"  skip {n.split('/')[-1]}: {ex}")
@@ -476,8 +561,21 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
         if old.endswith(".json"):
             os.remove(os.path.join(out_dir, old))
     written = []
+    face_meta = meta.get("face") or {}
+    face_diag, face_n = {}, 0
+    head_name = next((b["name"] for b in meta["skeleton"] if b.get("source") == "Head"), "Head")
     for c in clips:
         data = retarget(skel, c, meta, ex, fps, root_motion, ref_lpos)
+        fc = getattr(c, "face", None)
+        if fc is not None and face_meta:
+            times = np.linspace(0, c.length, data["frames"]) if c.length > 0 else np.zeros(1)
+            frames, diag = face_frames(fc, skel, face_meta, times)
+            if diag:
+                face_diag[fc.name.split("/")[-1]] = diag
+            if frames:
+                head = next((b for b in data["bones"] if b["name"] == head_name), None)
+                data["bones"] += face_tracks(frames, face_meta, head["rot"] if head else None, data["frames"])
+                face_n += 1
         if not data["bones"]:
             continue
         if data["maxDisplacement"] > 0.25 * height:
@@ -486,6 +584,13 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
         with open(p, "w", encoding="utf-8") as f:
             json.dump(data, f, separators=(",", ":"))
         written.append(p)
+    if face_meta:
+        log(f"  facial: {face_n} clip(s) with expression swaps")
+    if face_diag:
+        dp = os.path.join(out_dir, "_face_channels.json")
+        with open(dp, "w", encoding="utf-8") as f:
+            json.dump(face_diag, f, indent=1)
+        log(f"  facial clips have channels this tool doesn't recognise yet; please send {dp}")
     meta["animations"] = [os.path.basename(p)[:-5] for p in written]
     meta["exportPose"] = {"source": ex.desc, "error": ex.error, "scale": ex.k}
     meta["rootMotion"] = root_motion

@@ -49,6 +49,7 @@ class Options:
     anim_fps: float = 30.0
     root_motion: str = "inplace"     # inplace | full | none
     ear_bones: bool = True           # add the game's ear bones (UmaViewer's PMX drops them) so ears can animate
+    face_variants: bool = True       # expression copies of eyes/mouth/mayu hidden in the head, swapped by animation
 
     @classmethod
     def from_dict(cls, d: dict) -> "Options":
@@ -447,6 +448,100 @@ def _inject_ears(model: Model, pos: np.ndarray, joints: np.ndarray, weights: np.
     return assigned
 
 
+# Mini facial expressions are cells of a texture atlas (4 columns). UmaViewer's sliders move the UV offset by
+# 0.25 per column and 0.125 (eyes, mouth) or 0.25 (mayu) per row; frame k = row * 4 + column.
+FACE_PARTS = {          # part -> (frames, row step)
+    "Eye_L": (15, 0.125), "Eye_R": (15, 0.125), "Mouth": (19, 0.125), "Mayu_L": (9, 0.25), "Mayu_R": (9, 0.25),
+}
+
+
+def face_bone_name(part: str, k: int) -> str:
+    return f"Face_{part}_{k:02d}"
+
+
+def _face_part_of(kind: str):
+    if "mouth" in kind:
+        return "Mouth"
+    if "mayu" in kind:
+        return "Mayu"
+    if "eye" in kind:
+        return "Eye"
+    return None
+
+
+def _build_face_variants(prims, bone_pos, model, head, warnings):
+    """Replace each face part by one mesh holding every expression variant. Variant k is a copy with its UVs
+    shifted to atlas cell k and skinned to its own bone Face_<part>_<k> (child of Head). Variant 0 sits on the
+    face; the others are baked inside the head. Animation shows a variant by moving it out (Constant keys)."""
+    face_src = [p for p in prims if _face_part_of(p.kind)]
+    if not face_src:
+        return prims, bone_pos, {}
+    face_mesh = [p for p in prims if "face" in p.kind and not _face_part_of(p.kind)]
+    ref = np.concatenate([p.pos for p in face_mesh]) if face_mesh else np.concatenate([p.pos for p in face_src])
+    # head centre: middle of the face mesh's bounds, pushed back half its depth (behind the face surface)
+    lo, hi = ref.min(0), ref.max(0)
+    centre = (lo + hi) / 2
+    centre[2] -= (hi[2] - lo[2]) * 0.5 + (hi[1] - lo[1]) * 0.25
+    groups: dict[str, list] = {}
+    for p in face_src:
+        part = _face_part_of(p.kind)
+        if part == "Eye":   # one mesh, both eyes: split by side (character faces +Z, its left is +X)
+            vside = p.pos[:, 0] >= centre[0]
+            for side, name in ((True, "Eye_L"), (False, "Eye_R")):
+                keep = vside[p.faces].all(1) if side else (~vside[p.faces]).all(1)
+                if keep.any():
+                    groups.setdefault(name, []).append((p, p.faces[keep]))
+        elif part == "Mayu":
+            nm = p.kind.replace(" ", "_")
+            if "_l" in nm or nm.endswith("l"):
+                side = "Mayu_L"
+            elif "_r" in nm or nm.endswith("r"):
+                side = "Mayu_R"
+            else:
+                side = "Mayu_L" if p.pos[:, 0].mean() >= centre[0] else "Mayu_R"
+            groups.setdefault(side, []).append((p, p.faces))
+        else:
+            groups.setdefault("Mouth", []).append((p, p.faces))
+
+    out = [p for p in prims if p not in face_src]
+    new_bones, face_meta = [], {}
+    for part, items in groups.items():
+        frames, rstep = FACE_PARTS[part]
+        mat = items[0][0].material
+        pos_l, nrm_l, uv_l, j_l, w_l, f_l = [], [], [], [], [], []
+        base_v = 0
+        part_pos = np.concatenate([p.pos[np.unique(f)] for p, f in items])
+        cen = part_pos.mean(0)
+        hide = (centre - cen) * 0.9          # vector from the face surface to inside the head
+        bone_ids = []
+        for k in range(frames):
+            bi = len(bone_pos) + len(new_bones)
+            new_bones.append((face_bone_name(part, k), cen))
+            bone_ids.append(bi)
+            du, dv = 0.25 * (k % 4), rstep * (k // 4)
+            for p, f in items:
+                used, inv = np.unique(f.reshape(-1), return_inverse=True)
+                pos = p.pos[used] + (0 if k == 0 else hide)
+                pos_l.append(pos); nrm_l.append(p.nrm[used])
+                uv_l.append(p.uv[used] + np.array([du, dv], np.float32))   # glTF v points down: +row step
+                jj = np.zeros((len(used), 4), np.int64); jj[:, 0] = bi
+                ww = np.zeros((len(used), 4), np.float32); ww[:, 0] = 1
+                j_l.append(jj); w_l.append(ww)
+                f_l.append(inv.reshape(-1, 3) + base_v)
+                base_v += len(used)
+        np_ = _Prim(name=f"Face_{part}", kind=f"face_{part.lower()}", pos=np.concatenate(pos_l), nrm=np.concatenate(nrm_l),
+                    uv=np.concatenate(uv_l), joints=np.concatenate(j_l), weights=np.concatenate(w_l),
+                    faces=np.concatenate(f_l).astype(np.int32), material=mat, alpha=items[0][0].alpha)
+        out.append(np_)
+        face_meta[part] = {"bones": [face_bone_name(part, k) for k in range(frames)], "frames": frames,
+                           "rowStep": rstep, "hide": [float(x) for x in hide]}
+    for name, p in new_bones:
+        model.bones.append(Bone(name, name, np.zeros(3, np.float32), head))
+    if new_bones:
+        bone_pos = np.vstack([bone_pos, np.array([p for _, p in new_bones], np.float32)])
+    return out, bone_pos, face_meta
+
+
 def convert(pmx_path: str, out_dir: str, opt: Options | None = None, log=print, ear_rig: dict | None = None) -> Result:
     o = opt or Options()
     model = read_pmx(pmx_path)
@@ -564,6 +659,13 @@ def convert(pmx_path: str, out_dir: str, opt: Options | None = None, log=print, 
                 joints=np.concatenate([p.joints for p in elig]), weights=np.concatenate([p.weights for p in elig]),
                 faces=np.concatenate(fs), material=len(materials) - 1))
 
+    face_meta = {}
+    if o.face_variants and is_mini:
+        prims, bone_pos, face_meta = _build_face_variants(prims, bone_pos, model, head, warnings)
+        nb = len(model.bones)
+        if face_meta:
+            log("  face: " + ", ".join(f"{k} x{v['frames']}" for k, v in face_meta.items()) + " expression variants")
+
     if o.flatten_normals:
         for p in prims:
             p.nrm = np.tile(np.array([0, 1, 0], np.float32), (len(p.pos), 1))
@@ -633,6 +735,7 @@ def convert(pmx_path: str, out_dir: str, opt: Options | None = None, log=print, 
             "source": os.path.basename(pmx_path), "glb": os.path.basename(glb), "heightMeters": height,
             "bones": len(order), "meshes": len(prims), "triangles": tris, "options": asdict(o), "warnings": warnings,
             "unityToGltf": unity_to_gltf,
+            "face": face_meta,
             "skeleton": [{"name": jnames[i],
                           "source": model.bones[oi].name_en if model.bones[oi].name_en else model.bones[oi].name,
                           "parent": jpar[i], "world": [float(x) for x in jpos[i]]} for i, oi in enumerate(order)]}

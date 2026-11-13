@@ -82,10 +82,10 @@ def main():
         base = f"http://127.0.0.1:{PORT}/uma2roblox"
         model = os.path.splitext(os.path.basename(r.glb))[0]
         idx = json.load(urllib.request.urlopen(f"{base}/anims?model={urllib.request.quote(model)}"))
-        assert idx["animations"] == ["anm_min_eve_chr1001_00_test01_loop"] and len(idx["skeleton"]) == 4
+        assert idx["animations"] == ["anm_min_eve_chr1001_00_test01_loop"] and len([b for b in idx["skeleton"] if not b["name"].startswith("Face_")]) == 4
         an = json.load(urllib.request.urlopen(f"{base}/anim?model={urllib.request.quote(model)}&name=anm_min_eve_chr1001_00_test01_loop"))
         assert an["frames"] == 31 and len(an["bones"][0]["rot"]) == 31 * 4 and all("pos" not in b for b in an["bones"])
-        print("server ok:", model, idx["animations"], "| skeleton", [b["name"] for b in idx["skeleton"]])
+        print("server ok:", model, idx["animations"], "| skeleton", [b["name"] for b in idx["skeleton"] if not b["name"].startswith("Face_")])
     finally:
         reg.stop_server()
 
