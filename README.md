@@ -9,6 +9,22 @@ UmaViewer.exe ──Export Model (.pmx + Texture2D)──▶ Uma2Roblox.exe ─�
                                                         └──────────── "Sync" (localhost:34891) ─────────┘
 ```
 
+## Showcase
+Ported minis playing their game animations in Roblox Studio, cel-shaded with outlines, ear motion and facial
+expressions:
+
+| Tamamo Cross, run | Hokko Tarumae, reaction |
+|---|---|
+| ![Tamamo Cross running in Roblox Studio](docs/media/tamamo-cross-run.gif) | ![Hokko Tarumae playing a reaction animation in Roblox Studio](docs/media/hokko-tarumae-reaction.gif) |
+
+Every ported clip lands in the **Animation Editor**, ready to preview, tweak and publish:
+
+![Hokko Tarumae with a ported clip open in the Roblox Animation Editor](docs/media/animation-editor.png)
+
+| The app | The Studio plugin |
+|---|---|
+| ![Uma2Roblox app: character list, export queue and conversion log](docs/media/app.png) | ![Uma2Roblox Studio plugin panel](docs/media/studio-plugin.png) |
+
 ## What it does
 * Finds UmaViewer automatically if it's next to (or one level above) Uma2Roblox, or in your Documents,
   Desktop or Downloads folder. Otherwise it asks for the folder containing `UmaViewer.exe` on first start
@@ -104,7 +120,7 @@ Studio plugin, then start `Uma2Roblox.exe`. `Uma2Roblox-cli.exe` is the command-
    UnityPy and apsw-sqlite3mc.
 2. Double-click **`build_exe.bat`** → builds `Uma2Roblox.exe` in this folder.
    (Or skip building and just use **`run.bat`**.)
-3. Double-click **`install.bat`** → installs the Studio plugin, then restart Roblox Studio.
+3. Double-click **`install.bat`** → installs the Studio plugin; close and reopen your place in Studio (or restart Studio) to load it.
 
 ## Porting characters
 1. Start **Uma2Roblox.exe** and UmaViewer.
