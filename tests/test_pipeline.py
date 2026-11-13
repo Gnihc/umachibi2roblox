@@ -112,6 +112,38 @@ def main():
     assert any("hip baseline" in l for l in logs), logs
     assert all("dpos" not in b for b in d2["bones"]), [b["name"] for b in d2["bones"] if "dpos" in b]  # constant -> no offset
     print("hip baseline ok:", [l.strip() for l in logs if "baseline" in l][0][:70], "...")
+    outline_vertex_colour()
+
+
+def _outline(glb):
+    import struct
+    import numpy as np
+    g = open(glb, "rb").read(); jl = struct.unpack_from("<I", g, 12)[0]; j = json.loads(g[20:20 + jl]); b = g[20 + jl + 8:]
+    m = next(m for m in j["meshes"] if m["name"] == "Outline")["primitives"][0]
+    a = j["accessors"][m["attributes"]["POSITION"]]; v = j["bufferViews"][a["bufferView"]]
+    P = np.frombuffer(b, np.float32, a["count"] * 3, v.get("byteOffset", 0)).reshape(-1, 3)
+    ia = j["accessors"][m["indices"]]; iv = j["bufferViews"][ia["bufferView"]]
+    F = np.frombuffer(b, np.uint32, ia["count"], iv.get("byteOffset", 0)).reshape(-1, 3)
+    return P, F
+
+
+def outline_vertex_colour():
+    """Vertex colour red is Uma's outline width: 0 -> no hull there, 1 -> full width; no colour -> full everywhere."""
+    d = tempfile.mkdtemp()
+    plain = convert(make_test_pmx.main(os.path.join(d, "a"), -1), os.path.join(d, "ao"), log=lambda *_: None)
+    cut = 5.0   # PMX units: everything below is unoutlined
+    vc = convert(make_test_pmx.main(os.path.join(d, "b"), -1, outline_r=lambda p: 0.0 if p[1] < cut else 1.0),
+                 os.path.join(d, "bo"), log=lambda *_: None)
+    P0, F0 = _outline(plain.glb)
+    P1, F1 = _outline(vc.glb)
+    y = cut * 0.08
+    low0 = (P0[F0][:, :, 1] < y - 0.02).all(1).sum()
+    low1 = (P1[F1][:, :, 1] < y - 0.02).all(1).sum()
+    assert low0 > 0 and low1 == 0, (low0, low1)
+    hi0 = (P0[F0][:, :, 1] > y + 0.02).all(1).sum()
+    hi1 = (P1[F1][:, :, 1] > y + 0.02).all(1).sum()
+    assert hi0 == hi1 > 0, (hi0, hi1)
+    print(f"outline vertex colour ok: {len(F0)} -> {len(F1)} hull triangles ({low0} below the cut removed)")
 
 
 if __name__ == "__main__":

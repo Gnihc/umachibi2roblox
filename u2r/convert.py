@@ -33,6 +33,7 @@ class Options:
     outline: bool = True
     outline_width: float = 0.006    # fraction of model height
     outline_color: tuple = (41, 28, 33)
+    outline_vertex_color: bool = True   # thin/skip the outline where the model's vertex colour says so (as in game)
     light_dir: tuple = (0.0, 0.85, 0.55)   # y up, z = toward the character's front
     cel_threshold: float = 0.0
     cel_softness: float = 0.03
@@ -87,6 +88,7 @@ class _Prim:
     material: int = -1
     alpha: str = "OPAQUE"
     tex_path: str | None = None
+    outline_w: np.ndarray | None = None   # per-vertex outline width factor (vertex colour red), 1 = full
 
 
 # ------------------------------------------------------------------------- naming
@@ -288,6 +290,18 @@ def _smooth_normals(pos: np.ndarray, nrm: np.ndarray, q: float) -> np.ndarray:
     return np.where(ln > 1e-8, out / np.maximum(ln, 1e-8), nrm).astype(np.float32)
 
 
+def _weld_mean(pos: np.ndarray, val: np.ndarray, q: float) -> np.ndarray:
+    """Average a per-vertex value over vertices sharing a position (split UV/normal seams)."""
+    keys = np.round(pos / q).astype(np.int64)
+    _, inv = np.unique(keys, axis=0, return_inverse=True)
+    inv = inv.reshape(-1)
+    acc = np.zeros(inv.max() + 1, np.float64)
+    cnt = np.zeros(inv.max() + 1, np.float64)
+    np.add.at(acc, inv, val)
+    np.add.at(cnt, inv, 1)
+    return (acc / cnt)[inv].astype(np.float32)
+
+
 def _detect_forward(prims: list[_Prim]) -> float:
     eyes = [p.pos for p in prims if "eye" in p.kind] or [p.pos for p in prims if "face" in p.kind]
     if not eyes:
@@ -478,21 +492,46 @@ def _build_face_variants(prims, bone_pos, model, head, warnings):
     shifted to atlas cell k and skinned to its own bone Face_<part>_<k> (child of Head).
 
     Swapping is a pure rotation (scale-proof: Roblox scales animation translations with the model, never
-    rotations). Each bone sits halfway between the part on the face (F) and a point inside the head (C); a 180
-    degree turn about an axis through that pivot, perpendicular to F-C, maps F onto C and back. Variant 0 rests
-    on the face, the others rest turned inside the head; animation turns them (Constant keys)."""
+    rotations). Each bone sits halfway between the part on the face (F) and a point inside the head (C) at the
+    same height; a 180 degree turn about the vertical axis through that pivot maps F onto C and back. The default
+    variant rests on the face, the others rest turned inside the head; animation turns them (Constant keys).
+
+    The axis is exactly vertical so the flattened (straight up) normals stay up after a turn - a tilted axis
+    tilted them and the shown expression lost the model's flat lighting.
+
+    Only the island in the first atlas cell is an expression sprite. Other islands (the mouth has an overlay
+    quad pointing at an empty corner of its atlas) are dropped: shifted by the cell offset they wrap onto
+    another sprite and two expressions draw on top of each other."""
     face_src = [p for p in prims if _face_part_of(p.kind)]
     if not face_src:
         return prims, bone_pos, {}
     face_mesh = [p for p in prims if "face" in p.kind and not _face_part_of(p.kind)]
     ref = np.concatenate([p.pos for p in face_mesh]) if face_mesh else np.concatenate([p.pos for p in face_src])
-    # head centre: middle of the face mesh's bounds, pushed back half its depth (behind the face surface)
     lo, hi = ref.min(0), ref.max(0)
     centre = (lo + hi) / 2
-    centre[2] -= (hi[2] - lo[2]) * 0.5 + (hi[1] - lo[1]) * 0.25
+    head_w = float(hi[0] - lo[0])
+    # the mini face mesh is the whole head skin; a front plate only (some exports) is far shallower than wide
+    whole_head = (hi[2] - lo[2]) > 0.5 * head_w
+
+    def hide_depth(cen):
+        """z of the head's middle at this part's height (the part is hidden there, well inside the skin)."""
+        if not whole_head:
+            return cen[2] - 0.5 * head_w
+        band = np.abs(ref[:, 1] - cen[1]) < 0.06 * (hi[1] - lo[1])
+        zs = ref[band, 2] if band.sum() >= 8 else ref[:, 2]
+        return float(min((zs.min() + zs.max()) / 2, cen[2] - 0.05 * head_w))
+
+    def first_cell(p, f, part):
+        """Faces of the islands whose UVs lie in atlas cell 0 (the expression sprite itself)."""
+        rstep = FACE_PARTS.get(part, (0, 0.125))[1] if part != "Eye" else 0.125
+        tuv = p.uv[f].mean(1)
+        return f[(tuv[:, 0] < 0.25) & (tuv[:, 1] < rstep)]
     groups: dict[str, list] = {}
     for p in face_src:
         part = _face_part_of(p.kind)
+        cell0 = first_cell(p, p.faces, part if part != "Mayu" else "Mayu_L")
+        if 0 < len(cell0) < len(p.faces):   # overlay islands outside the first cell: dropped (see above)
+            p = _Prim(**{**p.__dict__, "faces": cell0})
         if part == "Eye":   # one mesh, both eyes: split by side (character faces +Z, its left is +X)
             vside = p.pos[:, 0] >= centre[0]
             for side, name in ((True, "Eye_L"), (False, "Eye_R")):
@@ -521,15 +560,10 @@ def _build_face_variants(prims, bone_pos, model, head, warnings):
         base_v = 0
         part_pos = np.concatenate([p.pos[np.unique(f)] for p, f in items])
         cen = part_pos.mean(0)
-        inside = cen + (centre - cen) * 0.9   # a point inside the head
+        inside = cen.copy()                    # straight back, same height and side: inside the head
+        inside[2] = hide_depth(cen)
         pivot = (cen + inside) / 2
-        d = inside - cen
-        dn = d / (np.linalg.norm(d) + 1e-12)
-        up = np.array([0.0, 1.0, 0.0])
-        axis = up - up.dot(dn) * dn            # perpendicular to F-C, as vertical as possible
-        if np.linalg.norm(axis) < 1e-6:
-            axis = np.array([1.0, 0.0, 0.0]) - dn[0] * dn
-        axis /= np.linalg.norm(axis)
+        axis = np.array([0.0, 1.0, 0.0])       # vertical: F-C is horizontal, and up normals stay up
         R180 = 2 * np.outer(axis, axis) - np.eye(3)   # rotation by 180 degrees about `axis`
         bone_ids = []
         for k in range(frames):
@@ -627,7 +661,8 @@ def convert(pmx_path: str, out_dir: str, opt: Options | None = None, log=print, 
             name=sanitize(m.name_en or m.name or f"mat{mi}"), kind=kind,
             pos=pos[used], nrm=nrm[used], uv=uv,
             joints=joints[used], weights=weights[used],
-            faces=inv.reshape(-1, 3).astype(np.int32), tex_path=tex_path))
+            faces=inv.reshape(-1, 3).astype(np.int32), tex_path=tex_path,
+            outline_w=model.colors[used, 0].copy() if model.colors is not None else None))
 
     if not prims:
         raise ValueError(
@@ -670,14 +705,18 @@ def convert(pmx_path: str, out_dir: str, opt: Options | None = None, log=print, 
             cat_nrm = np.concatenate([p.nrm for p in elig])
             sm = _smooth_normals(cat_pos, cat_nrm, max(1e-5, height * 1e-4))
             width = height * o.outline_width
+            ow = np.concatenate([p.outline_w if (o.outline_vertex_color and p.outline_w is not None)
+                                 else np.ones(len(p.pos), np.float32) for p in elig])
+            ow = _weld_mean(cat_pos, np.clip(ow, 0.0, 1.0), max(1e-5, height * 1e-4))   # no cracks at UV seams
             offs, fs = 0, []
             for p in elig:
-                fs.append(p.faces[:, [0, 2, 1]] + offs)
+                f = p.faces + offs
+                fs.append(f[(ow[f] > 0.01).any(1)][:, [0, 2, 1]])   # no hull where the whole triangle is unoutlined
                 offs += len(p.pos)
             images.append(_solid_png(o.outline_color))
             materials.append(_material("Outline", len(images) - 1, "OPAQUE"))
             prims.append(_Prim(
-                name="Outline", kind="outline", pos=cat_pos + sm * width, nrm=-sm,
+                name="Outline", kind="outline", pos=cat_pos + sm * (width * ow[:, None]), nrm=-sm,
                 uv=np.full((len(cat_pos), 2), 0.5, np.float32),
                 joints=np.concatenate([p.joints for p in elig]), weights=np.concatenate([p.weights for p in elig]),
                 faces=np.concatenate(fs), material=len(materials) - 1))

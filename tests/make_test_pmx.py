@@ -29,7 +29,8 @@ def uv_sphere(cx, cy, cz, r, seg=16, ring=10):
     return np.array(v), np.array(n), np.array(uv), np.array(f)
 
 
-def main(out_dir, facing=-1):
+def main(out_dir, facing=-1, outline_r=None):
+    """outline_r: optional fn(vertex position) -> vertex colour red (outline width), written as extra UV #3."""
     os.makedirs(os.path.join(out_dir, "Texture2D"), exist_ok=True)
     T = os.path.join(out_dir, "Texture2D")
     Image.new("RGBA", (128, 128), (250, 200, 180, 200)).save(os.path.join(T, "tex_mbdy1001_00_diff.png"))
@@ -76,7 +77,8 @@ def main(out_dir, facing=-1):
     out += s("スペシャルウィーク") + s("Special Week") + s("test") + s("test")
     out += struct.pack("<i", len(V))
     for i in range(len(V)):
-        out += struct.pack("<8f", *V[i], *N[i], *UV[i]) + b"\0" * 48
+        out += struct.pack("<8f", *V[i], *N[i], *UV[i]) + b"\0" * 32
+        out += struct.pack("<4f", outline_r(V[i]), 1, 1, 1) if outline_r else b"\0" * 16
         if i < nb:      # BDEF2 Hip/Spine
             out += bytes([1]) + struct.pack("<HHf", 1, 2, 0.6)
         elif i < nb + nh:  # BDEF4 Head

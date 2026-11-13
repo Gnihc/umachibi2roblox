@@ -45,6 +45,9 @@ class Model:
     materials: list[Material]
     bones: list[Bone]
     warnings: list[str] = field(default_factory=list)
+    # vertex colour RGBA when the exporter wrote one (UmaViewer: additional UV #3). Uma's toon shader reads
+    # red as the outline width (0 = no outline: frills, inner face, mouth), so the outline hull follows it.
+    colors: np.ndarray | None = None
 
 
 class _Reader:
@@ -114,6 +117,8 @@ def read_pmx(path: str) -> Model:
     uv = np.zeros((n, 2), np.float32)
     jnt = np.full((n, 4), -1, np.int32)
     wgt = np.zeros((n, 4), np.float32)
+    col = np.ones((n, 4), np.float32) if extra_uv >= 3 else None
+    cfmt = struct.Struct("<4f")
     bfmt = _index_reader(bsz, True)
     bsize = struct.calcsize(bfmt)
     d = r.d
@@ -125,6 +130,8 @@ def read_pmx(path: str) -> Model:
         pos[i] = vals[0:3]
         nrm[i] = vals[3:6]
         uv[i] = vals[6:8]
+        if col is not None:
+            col[i] = cfmt.unpack_from(d, o + 32)
         o += 16 * extra_uv
         t = d[o]
         o += 1
@@ -211,7 +218,9 @@ def read_pmx(path: str) -> Model:
                     r.unpack("6f")
         bones.append(Bone(bname, bname_en, bpos, parent))
 
-    m = Model(name, name_en, comment, pos, nrm, uv, jnt, wgt, faces, textures, mats, bones)
+    if col is not None and not col.any():   # an exporter that leaves the extra UVs empty wrote no colour
+        col = None
+    m = Model(name, name_en, comment, pos, nrm, uv, jnt, wgt, faces, textures, mats, bones, colors=col)
     if sum(x.face_count for x in mats) != nidx:
         m.warnings.append("Material face counts do not add up to the index count.")
     if vsz == 2 and n >= 65535:
