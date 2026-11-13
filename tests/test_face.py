@@ -14,24 +14,33 @@ EAR = CLIP.replace("/body/", "/facial/") + "_ear"
 HEAD_BONES = HAIR_BONES + [("M_Mouth", 4, (0, 7.4, 3.1)), ("M_Eye", 4, (0, 9, 3.15))]
 
 
-def face_clip():
-    # M_Mouth: _MainTex_ST offset jumps to column 1, row 1 (frame 5) at t = 0.5; plus one unknown channel
-    frames = [(0.0, [(0, 0, 0, 0, 0.0), (1, 0, 0, 0, 0.0)]), (0.5, [(0, 0, 0, 0, 0.25), (1, 0, 0, 0, -0.125)])]
-    tt = {"m_Name": "face", "m_SampleRate": 30, "m_MuscleClip": {"m_StartTime": 0, "m_StopTime": 1.0,
-          "m_Clip": {"data": {"m_StreamedClip": {"data": test_anim.streamed_data(frames), "curveCount": 2},
-                              "m_DenseClip": {}, "m_ConstantClip": {"data": [3.0]}}}},
-          "m_ClipBindingConstant": {"genericBindings": [
-              {"path": path_hash("M_Mouth"), "attribute": path_hash("material._MainTex_ST.z"), "typeID": 137, "customType": 22},
-              {"path": path_hash("M_Mouth"), "attribute": path_hash("material._MainTex_ST.w"), "typeID": 137, "customType": 22},
-              {"path": path_hash("M_Eye"), "attribute": 0xDEADBEEF, "typeID": 114, "customType": 0}]}}
-    return tt
+def _clip(bindings, frames, curve_count, const=()):
+    return {"m_Name": "face", "m_SampleRate": 30, "m_MuscleClip": {"m_StartTime": 0, "m_StopTime": 1.0,
+            "m_Clip": {"data": {"m_StreamedClip": {"data": test_anim.streamed_data(frames), "curveCount": curve_count},
+                                "m_DenseClip": {}, "m_ConstantClip": {"data": list(const)}}}},
+            "m_ClipBindingConstant": {"genericBindings": bindings}}
+
+
+def face_clip(kind="locator"):
+    if kind == "locator":
+        # real format (verified on anm_min_eve_chr1002_00_res01_e_face): Mouth_Ctrl local x = -index/100.
+        # Mouth goes to expression 5 at t=0.5 with a one-frame interpolated blip (x=-0.02) just before.
+        f = [(0.0, [(0, 0, 0, 0, 0.0), (1, 0, 0, 0, 0.0), (2, 0, 0, 0, 0.0)])]
+        f += [(14 / 30, [(0, 0, 0, 0, -0.02)]), (15 / 30, [(0, 0, 0, 0, -0.05)])]
+        return _clip([{"path": path_hash("Mouth_Ctrl"), "attribute": 1, "typeID": 4, "customType": 0}], f, 3)
+    if kind == "material":
+        f = [(0.0, [(0, 0, 0, 0, 0.0), (1, 0, 0, 0, 0.0)]), (0.5, [(0, 0, 0, 0, 0.25), (1, 0, 0, 0, -0.125)])]
+        return _clip([{"path": path_hash("M_Mouth"), "attribute": path_hash("material._MainTex_ST.z"), "typeID": 137, "customType": 22},
+                      {"path": path_hash("M_Mouth"), "attribute": path_hash("material._MainTex_ST.w"), "typeID": 137, "customType": 22}], f, 2)
+    return _clip([{"path": path_hash("M_Eye"), "attribute": 0xDEADBEEF, "typeID": 114, "customType": 0}], [], 0, [3.0])
 
 
 class GD(EarGD):
     entries = {BODY: 1, HAIR: 1, CLIP: 1, FACE: 1}
+    kind = "locator"
     def load(self, n):
         return {BODY: lambda: EarGD().load(BODY), HAIR: lambda: env_from(HEAD_BONES),
-                CLIP: lambda: clip_env(body_clip()), FACE: lambda: clip_env(face_clip())}[n]()
+                CLIP: lambda: clip_env(body_clip()), FACE: lambda: clip_env(face_clip(self.kind))}[n]()
 
 
 def main():
@@ -64,21 +73,29 @@ def main():
     assert (PL[:, 0] > 0).all()
     print("face variants ok:", {k: v["frames"] for k, v in face.items()}, "| hide", np.round(hide, 3))
 
-    written = port_character_animations(GD(), r.meta, log=logs.append)
-    a = json.load(open(written[0]))
-    by = {bb["name"]: bb for bb in a["bones"]}
-    fb = sorted(n for n in by if n.startswith("Face_"))
-    assert fb == ["Face_Mouth_00", "Face_Mouth_05"], fb
-    d0 = np.array(by["Face_Mouth_00"]["dpos"]).reshape(-1, 3); d5 = np.array(by["Face_Mouth_05"]["dpos"]).reshape(-1, 3)
-    n = a["frames"]; half = int(0.5 * (n - 1))
-    assert np.allclose(d0[:half], 0) and np.allclose(d5[:half], 0)           # first half: rest expression
-    assert np.allclose(d0[-1], hide) and np.allclose(d5[-1], -hide)          # then frame 5 shown, frame 0 hidden
-    assert by["Face_Mouth_05"]["constant"] is True
-    assert any("_face_channels.json" in l for l in logs), logs
-    diag = json.load(open(os.path.join(os.path.dirname(written[0]), "_face_channels.json")))
-    assert list(diag.values())[0][0]["typeID"] == 114
-    print("face animation ok: swap at frame", int(np.argmax(np.any(d5 != 0, 1))), "of", n, "| unknown channels dumped")
+    def run(kind):
+        gd = GD(); gd.kind = kind
+        lg = []
+        w = port_character_animations(gd, r.meta, log=lg.append)
+        return json.load(open(w[0])), lg, w
 
+    for kind in ("locator", "material"):
+        a, lg, _ = run(kind)
+        by = {bb["name"]: bb for bb in a["bones"]}
+        fb = sorted(n for n in by if n.startswith("Face_"))
+        assert fb == ["Face_Mouth_00", "Face_Mouth_05"], (kind, fb)      # the 1-frame blip (2) is dropped
+        d0 = np.array(by["Face_Mouth_00"]["dpos"]).reshape(-1, 3); d5 = np.array(by["Face_Mouth_05"]["dpos"]).reshape(-1, 3)
+        assert np.allclose(d0[:14], 0) and np.allclose(d5[:14], 0)       # rest expression first
+        assert np.allclose(d0[-1], hide) and np.allclose(d5[-1], -hide)   # then 5 shown, 0 hidden
+        assert by["Face_Mouth_05"]["constant"] is True
+        print(f"face animation ok ({kind}): swap at frame", int(np.argmax(np.any(d5 != 0, 1))), "of", a["frames"])
+
+    a, lg, w = run("unknown")
+    assert not any(b["name"].startswith("Face_") for b in a["bones"])
+    assert any("_face_channels.json" in l for l in lg), lg
+    diag = json.load(open(os.path.join(os.path.dirname(w[0]), "_face_channels.json")))
+    assert list(diag.values())[0][0]["typeID"] == 114
+    print("unknown face channels dumped ok")
 
 if __name__ == "__main__":
     main()

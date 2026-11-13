@@ -383,8 +383,44 @@ _FACE_RENDERERS = {
 }
 
 
+# The mini *_face clips drive locator transforms (Gallop.DrivenKeyAnimation): each part has a "<Part>_Ctrl"
+# locator whose local x position is -(expression index) / 100. Verified on anm_min_eve_chr1002_00_res01_e_face:
+# Mouth_Ctrl x=-0.16, Eye_L_Ctrl/Eye_R_Ctrl x=-0.09, Mayu_*_Ctrl 0, Cheek_Ctrl moves on z.
+FACE_LOCATORS = {"Eye_L": "Eye_L_Ctrl", "Eye_R": "Eye_R_Ctrl", "Mouth": "Mouth_Ctrl",
+                 "Mayu_L": "Mayu_L_Ctrl", "Mayu_R": "Mayu_R_Ctrl"}
+LOCATOR_STEP = 0.01
+
+
+def _drop_blips(fr: np.ndarray) -> np.ndarray:
+    """Locator keys interpolate between expressions (e.g. 9 -> 3 -> 0 over two frames); a texture swap can't
+    blend, so an index that lasts a single sample takes the value that follows it."""
+    fr = fr.copy()
+    for i in range(len(fr) - 2, 0, -1):
+        if fr[i] != fr[i - 1] and fr[i] != fr[i + 1]:
+            fr[i] = fr[i + 1]
+    return fr
+
+
+def _locator_track(clip: Clip, skel: Skeleton, locator: str):
+    f = clip.tracks.get((path_hash(locator), 1))
+    if f is None and locator in skel.by_name:          # locator found deeper in a prefab hierarchy
+        f = clip.tracks.get((path_hash(skel.paths[skel.by_name[locator]]), 1))
+    return f
+
+
 def face_frames(clip: Clip, skel: Skeleton, face_meta: dict, times: np.ndarray):
     """-> ({part: frame index per sample}, diagnostics list). Frame = row * 4 + column of the atlas cell."""
+    out = {}
+    for part, loc in FACE_LOCATORS.items():
+        if part not in face_meta:
+            continue
+        f = _locator_track(clip, skel, loc)
+        if f is not None:
+            x = np.asarray(f(times))[:, 0]
+            out[part] = _drop_blips(np.clip(np.rint(-x / LOCATOR_STEP).astype(int), 0, face_meta[part]["frames"] - 1))
+    if out:
+        return out, []
+    # fallback: material UV-offset channels (_MainTex_ST / _UVOffset)
     chans = {}
     diag = []
     for o in clip.other:
@@ -398,7 +434,6 @@ def face_frames(clip: Clip, skel: Skeleton, face_meta: dict, times: np.ndarray):
             diag.append({"renderer": rname or f"hash:{o['path']:08x}", "attribute": f"{o['attribute']:08x}",
                          "typeID": o["typeID"], "customType": o["customType"],
                          "min": float(np.min(v)), "max": float(np.max(v))})
-    out = {}
     for rname, specs in _FACE_RENDERERS.items():
         for part, prop, cx, cy in specs:
             if part not in face_meta:
@@ -412,6 +447,12 @@ def face_frames(clip: Clip, skel: Skeleton, face_meta: dict, times: np.ndarray):
             col = np.mod(np.rint(x / 0.25).astype(int), 4)
             row = np.maximum(np.rint(-y / rstep).astype(int), 0)
             out[part] = np.clip(row * 4 + col, 0, face_meta[part]["frames"] - 1)
+    if not out:   # nothing recognised: report the clip's transform channels too
+        known = {path_hash(n): n for n in list(FACE_LOCATORS.values()) + ["Cheek_Ctrl"]}
+        for (h, attr), f in clip.tracks.items():
+            v = np.asarray(f(times))
+            diag.append({"transform": known.get(h, f"hash:{h:08x}"), "channel": attr,
+                         "min": np.round(v.min(0), 4).tolist(), "max": np.round(v.max(0), 4).tolist()})
     return out, diag
 
 

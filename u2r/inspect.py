@@ -22,7 +22,9 @@ SIBLINGS = ("_face", "_face_driven", "_ear", "_ear_driven")
 def _clip_report(tt: dict, name: str, skel=None, samples: int = 9) -> dict:
     c = decode_clip(tt, name)
     T = np.linspace(0, max(c.length, 1e-3), samples)
-    names = (lambda h: skel.names[skel.by_hash[h]] if skel and h in skel.by_hash else f"hash:{h:08x}")
+    from .anim import FACE_LOCATORS, path_hash
+    known = {path_hash(n): n for n in list(FACE_LOCATORS.values()) + ["Cheek_Ctrl", "Ear_L_Ctrl", "Ear_R_Ctrl"]}
+    names = (lambda h: skel.names[skel.by_hash[h]] if skel and h in skel.by_hash else known.get(h, f"hash:{h:08x}"))
     transforms = []
     for (h, attr), f in sorted(c.tracks.items(), key=lambda kv: names(kv[0][0])):
         v = np.asarray(f(T))
