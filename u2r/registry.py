@@ -115,6 +115,13 @@ class Registry:
         return {"model": model, "skeleton": meta.get("skeleton", []), "animations": meta.get("animations", []),
                 "exportPose": meta.get("exportPose")}
 
+    def physics(self, model: str) -> dict | None:
+        """Swing-bone physics from the sidecar, with the skeleton the plugin fits GLB space with."""
+        meta = self._model_meta(model)
+        if meta is None or not meta.get("physics"):
+            return None
+        return {"model": model, "skeleton": meta.get("skeleton", []), **meta["physics"]}
+
     def anim(self, model: str, name: str) -> dict | None:
         p = os.path.join(self.out_dir or "", "anims", os.path.basename(model), os.path.basename(name) + ".json")
         if not os.path.exists(p):
@@ -149,6 +156,9 @@ class Registry:
                 if path == "/uma2roblox/anims":
                     r = reg.anims_index(q.get("model", ""))
                     return self._send(200, r) if r is not None else self._send(404, {"error": "unknown model"})
+                if path == "/uma2roblox/physics":
+                    r = reg.physics(q.get("model", ""))
+                    return self._send(200, r) if r is not None else self._send(404, {"error": "no physics for this model"})
                 if path == "/uma2roblox/anim":
                     r = reg.anim(q.get("model", ""), q.get("name", ""))
                     return self._send(200, r) if r is not None else self._send(404, {"error": "unknown animation"})

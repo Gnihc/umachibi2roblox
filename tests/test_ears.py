@@ -120,6 +120,50 @@ def main():
     assert abs(ang - 40) < 0.5, ang
     print(f"ear animation ok: Ear_01_L turns {ang:.1f} deg, bones animated: {sorted(by)}")
 
+    # real format: the _ear clip moves locators that blend the character's ear_target poses.
+    # Left-ear type 9 locator at (-w, w, w) / 100 with w ramping 0 -> 1; type 9 (L) = Ear_01_L 30 deg about z
+    written = port_character_animations(LocatorGD(), r.meta, log=lambda m: print("  ", m))
+    a = json.load(open(written[0]))
+    by = {bb["name"]: bb for bb in a["bones"]}
+    q = np.array(by["Ear_01_L"]["rot"]).reshape(-1, 4)
+    a0 = 2 * math.degrees(math.acos(min(1, abs(q[0][3])))); a1 = 2 * math.degrees(math.acos(min(1, abs(q[-1][3]))))
+    assert a0 < 0.5 and abs(a1 - 30) < 0.5, (a0, a1)
+    assert np.allclose(np.abs(np.array(by["Ear_01_R"]["rot"]).reshape(-1, 4)[:, 3]), 1, atol=1e-5)  # R weight 0
+    print(f"ear locators ok: Ear_01_L 0 -> {a1:.1f} deg from ear_target type 9")
+
+
+TARGET = "sourceresources/3d/chara/head/chr1001_00/facial/ast_chr1001_00_ear_target"
+
+
+def locator_ear_clip():
+    L9, R9 = 3090132844, 622057165          # anim.EAR_LOCATORS: (1, 9) and (0, 9)
+    frames = []
+    for i in range(31):
+        w = i / 30 / 100
+        frames.append((i / 30, [(c, 0, 0, 0, v) for c, v in enumerate([-w, w, w, 0, 0, 0])]))
+    return {"m_Name": "ear", "m_SampleRate": 30, "m_MuscleClip": {"m_StartTime": 0, "m_StopTime": 1.0,
+            "m_Clip": {"data": {"m_StreamedClip": {"data": test_anim.streamed_data(frames), "curveCount": 6},
+                                "m_DenseClip": {}, "m_ConstantClip": {"data": []}}}},
+            "m_ClipBindingConstant": {"genericBindings": [{"path": L9, "attribute": 1, "typeID": 4},
+                                                          {"path": R9, "attribute": 1, "typeID": 4}]}}
+
+
+def ear_target_tt():
+    def trs(path, rz): return {"_path": path, "_position": {"x": 0, "y": 0, "z": 0}, "_rotation": {"x": 0, "y": 0, "z": rz}}
+    faces = [{"_faceGroupInfo": [{"_trsArray": [trs("Ear_01_R", 0)]}, {"_trsArray": [trs("Ear_01_L", 0)]}]} for _ in range(17)]
+    faces[9] = {"_faceGroupInfo": [{"_trsArray": [trs("Ear_01_R", -30)]}, {"_trsArray": [trs("Ear_01_L", 30)]}]}
+    return {"m_Name": "ast_chr1001_00_ear_target", "_targetFaces": faces}
+
+
+class LocatorGD(GD):
+    entries = {**GD.entries, TARGET: 1}
+    def load(self, n):
+        if n == EAR:
+            return clip_env(locator_ear_clip())
+        if n == TARGET:
+            return type("Env", (), {"objects": [FakeObj(9, "MonoBehaviour", ear_target_tt())]})()
+        return super().load(n)
+
 
 if __name__ == "__main__":
     main()

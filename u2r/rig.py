@@ -74,6 +74,35 @@ def build_skeleton(gd, chara_id: int, costume: str, log=print) -> Skeleton:
     return sk
 
 
+def ear_targets(gd, chara_id: int, costume: str, log=print) -> list | None:
+    """The ear poses the *_ear locator clips blend (see anim.EAR_LOCATORS). The mini hair prefab references
+    the character's ast_chr<id>_<costume>_ear_target; fall back to that name for the costume, then _00."""
+    from .anim import ear_targets_from_tt
+    names = []
+    for hp in head_prefabs(gd, chara_id, costume)[:1]:
+        try:
+            for o in gd.load(hp).objects:
+                if o.type.name == "AssetBundle":
+                    names += [d[:-2] if d.endswith(".a") else d for d in o.read_typetree().get("m_Dependencies") or []
+                              if "_ear_target" in d]
+        except Exception as ex:
+            log(f"  ear targets: {hp.split('/')[-1]} unreadable: {ex}")
+    for c in (costume, "00"):
+        names.append(f"sourceresources/3d/chara/head/chr{chara_id}_{c}/facial/ast_chr{chara_id}_{c}_ear_target")
+    for n in dict.fromkeys(names):
+        if n not in gd.entries:
+            continue
+        try:
+            for o in gd.load(n).objects:
+                if o.type.name == "MonoBehaviour":
+                    tt = o.read_typetree()
+                    if "_targetFaces" in tt:
+                        return ear_targets_from_tt(tt)
+        except Exception as ex:
+            log(f"  ear targets {n.split('/')[-1]} skipped: {ex}")
+    return None
+
+
 def ear_chains(sk: Skeleton) -> list[list[int]]:
     """Chains of bones named Ear* (root .. tip), one per ear."""
     ears = [i for i, n in enumerate(sk.names) if n.lower().startswith("ear")]

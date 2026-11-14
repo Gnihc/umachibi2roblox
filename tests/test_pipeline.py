@@ -70,7 +70,7 @@ def main():
     written = port_character_animations(FakeGD(), r.meta, log=lambda m: print("  ", m))
     assert len(written) == 1, written
     a = json.load(open(written[0]))
-    names = [b["name"] for b in a["bones"]]
+    names = [b["name"] for b in a["bones"] if not b["name"].startswith("Face_")]
     assert names == ["Spine", "Head"], names     # Arm_L isn't in the GLB (no weights) -> skipped
     meta = json.load(open(r.meta))
     assert meta["exportPose"]["source"] == "rest pose" and meta["exportPose"]["error"] < 1e-4, meta["exportPose"]

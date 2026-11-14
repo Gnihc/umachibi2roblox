@@ -91,7 +91,8 @@ def main():
         a, lg, _ = run(kind)
         by = {bb["name"]: bb for bb in a["bones"]}
         fb = sorted(n for n in by if n.startswith("Face_"))
-        assert fb == [f"Face_Mouth_{k:02d}" for k in range(19)], (kind, fb)   # every variant keyed (no fall-through)
+        assert [n for n in fb if n.startswith("Face_Mouth_")] == [f"Face_Mouth_{k:02d}" for k in range(19)], (kind, fb)  # every variant keyed (no fall-through)
+        assert fb == sorted(n for pm in face.values() for n in pm["bones"]), (kind, fb)   # undriven parts keyed at default
         q = {k: np.array(by[f"Face_Mouth_{k:02d}"]["rot"]).reshape(-1, 4) for k in range(19)}
         ident = lambda x: np.allclose(np.abs(x[:, 3]), 1, atol=1e-5)
         turn = lambda x: np.allclose(np.abs(x[:, :3] @ axis), 1, atol=1e-5) and np.allclose(x[:, 3], 0, atol=1e-5)
@@ -104,7 +105,8 @@ def main():
         print(f"face animation ok ({kind}): swap at frame", int(np.argmax(np.abs(q5[:, 3]) < 0.5)), "of", a["frames"])
 
     a, lg, w = run("unknown")
-    assert not any(b["name"].startswith("Face_") for b in a["bones"])
+    fbs = [b for b in a["bones"] if b["name"].startswith("Face_")]
+    assert fbs and all(np.allclose(np.abs(np.array(b["rot"]).reshape(-1, 4)[:, 3]), 1, atol=1e-5) for b in fbs)  # default face
     assert any("_face_channels.json" in l for l in lg), lg
     diag = json.load(open(os.path.join(os.path.dirname(w[0]), "_face_channels.json")))
     assert list(diag.values())[0][0]["typeID"] == 114

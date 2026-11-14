@@ -34,6 +34,9 @@ def cli(argv):
     an.add_argument("--general", action="store_true", help="also every General mini animation")
     an.add_argument("--with", dest="with_clips", action="append", default=[], metavar="CLIP",
                     help="attach one General clip (e.g. anm_min_cir_type00_01_101); repeatable, remembered per model")
+    ph = sub.add_parser("physics", help="read swing-bone (hair, tail, skirt) physics from the game into model sidecar(s); "
+                                         "'anims' does this too")
+    ph.add_argument("meta", nargs="+", help="Uma_*.json files next to the .glb")
     pl = sub.add_parser("plugin", help="check the Roblox Studio plugin is installed and up to date")
     pl.add_argument("--install", action="store_true", help="install / update it in Studio's Plugins folder")
     gl = sub.add_parser("general", help="list General mini animations (not tied to a character)")
@@ -68,6 +71,14 @@ def cli(argv):
         for m in a.meta:
             print(m)
             port_character_animations(gd, m, a.general, a.fps, root_motion=a.root_motion, extra_clips=a.with_clips)
+        return
+    if a.cmd == "physics":
+        from .gamedata import GameData
+        from .physics import port_physics
+        gd = GameData(s.get("game_dir") or catalog.find_game_dir(uv), uv)
+        for m in a.meta:
+            print(m)
+            port_physics(gd, m)
         return
     if a.cmd == "plugin":
         from . import studio_plugin

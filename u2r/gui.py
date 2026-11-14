@@ -123,8 +123,8 @@ class Watcher(threading.Thread):
             res = convert(dst_pmx, app.out_dir(), app.options(), log=lambda s: app.post("log", s), ear_rig=ear)
             app.registry.mark_exported(res.chara_id, res.name, res.costume, os.path.basename(res.glb))
             app.post("converted", res)
-            if app.options().port_animations:
-                app.port_animations(res.meta)
+            if not (app.options().port_animations and app.port_animations(res.meta)):
+                app.port_physics(res.meta)      # porting animations does this too
         except Exception as ex:
             app.post("log", f"FAILED {os.path.basename(pmx)}: {ex}\n{traceback.format_exc()}")
 
@@ -760,6 +760,14 @@ class App:
         if picks and consume:
             self.post("general_used", picks)
         return True
+
+    def port_physics(self, meta_path: str):
+        """Runs off the UI thread: swing-bone physics from the game, for SmartBone in Studio."""
+        from .physics import port_physics
+        try:
+            port_physics(self.gamedata(), meta_path, log=lambda m: self.post("log", m))
+        except Exception as ex:
+            self.post("log", f"Physics skipped: {ex}")
 
     def port_all_animations(self):
         metas = [os.path.join(self.out_dir(), f) for f in self.converted_models()]

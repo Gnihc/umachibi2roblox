@@ -482,12 +482,121 @@ def face_tracks(frames: dict, face_meta: dict, head_rot: list | None, n: int) ->
     return bones
 
 
+# The mini *_ear clips don't rotate the ear bones either: like *_face they drive locators
+# (Gallop.DrivenKeyAnimation), one per (side, ear type). A locator's local position is (-w, w, w) / 100,
+# w = blend weight of that ear type. The poses are in the character's ast_chr<id>_<costume>_ear_target
+# (_targetFaces[type]._faceGroupInfo[side]._trsArray: bone path + Euler offset in degrees; type 0 = neutral,
+# side 0 = R, 1 = L). Locator names aren't in the bundles, so this maps their path hashes; verified against
+# every *_ear_driven list (animationEarType) in the game data.
+EAR_LOCATORS = {
+    3276006170: (0, 1), 3708636041: (0, 2), 1478934946: (0, 3), 3973268946: (0, 4), 1384540640: (0, 5),
+    2058908891: (0, 6), 1175804438: (0, 7), 2381413617: (0, 8), 622057165: (0, 9), 2450372380: (0, 10),
+    1015751580: (0, 11), 199355849: (0, 12), 2908745659: (0, 13), 882861639: (0, 14), 2060500165: (0, 15),
+    967528252: (0, 16),
+    1585420987: (1, 1), 1076965928: (1, 2), 3306862595: (1, 3), 3971804368: (1, 4), 1391050978: (1, 5),
+    3884191098: (1, 6), 1182462740: (1, 7), 1677685364: (1, 8), 3090132844: (1, 9), 2455903774: (1, 10),
+    637452874: (1, 11), 193873099: (1, 12), 1129439550: (1, 13), 888196933: (1, 14), 2059343303: (1, 15),
+    969205310: (1, 16),
+}
+
+
+def ear_targets_from_tt(tt: dict) -> list:
+    """ear_target MonoBehaviour typetree -> [type][side] -> {bone name: Euler degrees (3,)}."""
+    out = []
+    for face in tt.get("_targetFaces") or []:
+        sides = []
+        for g in face.get("_faceGroupInfo") or []:
+            sides.append({t["_path"].split("/")[-1]: np.array([t["_rotation"][c] for c in "xyz"], np.float64)
+                          for t in g.get("_trsArray") or []})
+        out.append(sides)
+    return out
+
+
+def ear_driven_tracks(ear: Clip, skel: Skeleton, targets: list) -> dict:
+    """Locator-driven ear clip -> rotation tracks for the ear bones (local = rest * Euler(sum w_k * e_k))."""
+    loc = {}
+    for (h, attr), f in ear.tracks.items():
+        if attr == 1 and h in EAR_LOCATORS:
+            loc[EAR_LOCATORS[h]] = f
+    if not loc:
+        return {}
+    per_bone: dict[int, list] = {}           # bone index -> [(weight fn, euler)]
+    for (side, typ), f in loc.items():
+        if typ >= len(targets) or side >= len(targets[typ]):
+            continue
+        for bone, e in targets[typ][side].items():
+            bi = skel.by_name.get(bone)
+            if bi is not None and np.abs(e).max() > 1e-6:
+                per_bone.setdefault(bi, []).append((f, e))
+    tracks = {}
+    for bi, terms in per_bone.items():
+        rest = skel.rest_rot[bi]
+
+        def track(T, terms=terms, rest=rest):
+            T = np.asarray(T, np.float64)
+            e = np.zeros((len(T), 3))
+            for f, eu in terms:
+                v = np.asarray(f(T))
+                w = np.clip((v[:, 1] + v[:, 2] - v[:, 0]) / 3 * 100, 0, 1)
+                e += w[:, None] * eu
+            return qmul(np.broadcast_to(rest, (len(T), 4)), euler_to_quat(e))
+        tracks[(path_hash(skel.paths[bi]), 2)] = track
+    return tracks
+
+
 ROOT_BONE = "Position"          # carries the chibi's movement through the scene in the game
 TRANSLATING_BONES = ("Position", "Hip")
 
 
+def _family(name: str) -> str:
+    for suf in ("_s", "_loop", "_e"):
+        if name.endswith(suf):
+            return name[: -len(suf)]
+    return name
+
+
+def scene_offsets(skel: Skeleton, clips: list, ex: ExportPose, ref_lpos: dict, height: float,
+                  min_frac: float = 0.2) -> dict:
+    """{clip name: hip baseline shift (parent-local, skeleton units)} for clips that place the character away
+    from the animator root for their game scene (circle/mode clips put each chibi on its seat through the Hip).
+    A clip family (<x>_s / _loop / _e, or a single clip) whose hip never comes within min_frac of the height
+    (horizontally) of the baseline is moved so its first frame stands on the baseline, like the character's own
+    clips. Families that start centred and step away (e.g. res01_s) are motion and are left alone. Height
+    (sitting, lying) is kept."""
+    hip = skel.by_name.get("Hip")
+    if hip is None or skel.parents[hip] < 0:
+        return {}
+    par = skel.parents[hip]
+    M = ex.L[par]
+    Minv = np.linalg.inv(M)
+    base = ref_lpos.get(hip, ex.lpos[hip])
+    fams: dict[str, list] = {}
+    for c in clips:
+        fams.setdefault(_family(c.name), []).append(c)
+    order = {"_s": 0, "": 1, "_loop": 2, "_e": 3}
+    out = {}
+    for fam, cs in fams.items():
+        cs = sorted(cs, key=lambda c: order.get(c.name[len(fam):], 1))
+        first, near = None, False
+        for c in cs:
+            ts = np.linspace(0, c.length, max(2, int(round(c.length * 30)) + 1)) if c.length > 0 else np.zeros(1)
+            d = fk(skel, c, ts).lpos[:, hip] - base
+            w = d @ M.T                                     # world at export, Unity axes
+            w[:, 1] = 0
+            if first is None:
+                first = w[0]
+            if (np.linalg.norm(w, axis=1) * ex.k).min() < min_frac * height:
+                near = True
+                break
+        if not near and first is not None:
+            shift = Minv @ first
+            for c in cs:
+                out[c.name] = shift
+    return out
+
+
 def retarget(skel: Skeleton, clip: Clip, meta: dict, ex: ExportPose, fps: float = 30.0,
-             root_motion: str = "inplace", ref_lpos: dict | None = None) -> dict:
+             root_motion: str = "inplace", ref_lpos: dict | None = None, hip_shift=None) -> dict:
     """Per GLB bone: world delta rotation D(t) = O(t) O_export^-1 (glTF axes), and for the hip (and the
     root in "full" mode) a position delta in GLB metres in world axes of the export pose (the plugin
     rotates it with the parent). Bone lengths always come from the rig itself.
@@ -525,6 +634,8 @@ def retarget(skel: Skeleton, clip: Clip, meta: dict, ex: ExportPose, fps: float 
         if (P.pos_animated[b] and par >= 0 and name in TRANSLATING_BONES and root_motion != "none"
                 and b not in hold):
             ref = ref_lpos.get(b, ex.lpos[b])
+            if hip_shift is not None and name == "Hip":
+                ref = ref + hip_shift                                # re-centre a scene-placed clip
             dl = P.lpos[:, b] - ref                                  # parent-local, skeleton units
             dw = np.einsum("ij,tj->ti", A @ ex.L[par], dl) * ex.k   # world at export, glTF metres
             if np.abs(dw).max() > 1e-5:
@@ -566,6 +677,11 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
         meta.pop("generalClips", None)
     if not names:
         log(f"  no mini animations found for {cid}")
+        try:
+            from .physics import port_physics
+            port_physics(gd, meta_path, log, skel=skel)
+        except Exception as e:
+            log(f"  physics skipped: {e}")
         return []
     def load_clip(n):
         for o in gd.load(n).objects:
@@ -573,21 +689,27 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
                 return decode_clip(o.read_typetree(), n)
         return None
 
+    from .rig import ear_targets
+    targets = ear_targets(gd, cid, costume, log)
+    if targets is None:
+        log("  ear poses (ear_target) not found in game data; ears follow the head only")
     clips, with_ears = [], 0
     for n in names:
         try:
             c = load_clip(n)
             if c is None:
                 continue
-            # ear motion lives in a sibling clip: <...>/facial/<...>_ear (the *_ear_driven ones are not bone motion)
+            # ear motion lives in a sibling clip: <...>/facial/<...>_ear. It drives locators that blend the
+            # character's ear poses (EAR_LOCATORS); older/other clips may key the ear bones directly.
             ear_name = ear_clip_name(n)
             if ear_name in gd.entries:
                 try:
                     e = load_clip(ear_name)
                     if e is not None:
-                        c.tracks.update(e.tracks)
+                        driven = ear_driven_tracks(e, skel, targets) if targets else {}
+                        c.tracks.update(driven or e.tracks)
                         c.length = max(c.length, e.length)
-                        with_ears += 1
+                        with_ears += 1 if driven or any(h in skel.by_hash for h, _ in e.tracks) else 0
                 except Exception as ex:
                     log(f"  ear clip {ear_name.split('/')[-1]} skipped: {ex}")
             fc_name = face_clip_name(n)
@@ -619,6 +741,10 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
             ref_lpos[hip] = idle0
             log(f"  hip baseline: export pose is {off / height:.0%} of height from {idle.name.split('/')[-1]}; "
                 "using that clip's first frame as the baseline")
+    hip_shift = scene_offsets(skel, clips, ex, ref_lpos, height) if root_motion == "inplace" else {}
+    if hip_shift:
+        log(f"  root offset: {len(hip_shift)} clip(s) placed away from the rig's centre in their game scene "
+            "(e.g. circle seats); re-centred like the character's own clips")
     out_dir = os.path.join(os.path.dirname(meta_path), "anims", os.path.splitext(meta["glb"])[0])
     os.makedirs(out_dir, exist_ok=True)
     for old in os.listdir(out_dir):
@@ -629,17 +755,24 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
     face_diag, face_n = {}, 0
     head_name = next((b["name"] for b in meta["skeleton"] if b.get("source") == "Head"), "Head")
     for c in clips:
-        data = retarget(skel, c, meta, ex, fps, root_motion, ref_lpos)
+        data = retarget(skel, c, meta, ex, fps, root_motion, ref_lpos, hip_shift.get(c.name))
         fc = getattr(c, "face", None)
-        if fc is not None and face_meta:
-            times = np.linspace(0, c.length, data["frames"]) if c.length > 0 else np.zeros(1)
-            frames, diag = face_frames(fc, skel, face_meta, times)
-            if diag:
-                face_diag[fc.name.split("/")[-1]] = diag
-            if frames:
-                head = next((b for b in data["bones"] if b["name"] == head_name), None)
-                data["bones"] += face_tracks(frames, face_meta, head["rot"] if head else None, data["frames"])
-                face_n += 1
+        if face_meta:
+            frames = {}
+            if fc is not None:
+                times = np.linspace(0, c.length, data["frames"]) if c.length > 0 else np.zeros(1)
+                frames, diag = face_frames(fc, skel, face_meta, times)
+                if diag:
+                    face_diag[fc.name.split("/")[-1]] = diag
+                if frames:
+                    face_n += 1
+            # parts the clip doesn't drive (many General clips have no *_face clip at all) show the default
+            # expression, keyed so this track owns the face instead of an earlier track's expression
+            for part, pm in face_meta.items():
+                if part not in frames:
+                    frames[part] = np.full(data["frames"], int(pm.get("default", 0)))
+            head = next((b for b in data["bones"] if b["name"] == head_name), None)
+            data["bones"] += face_tracks(frames, face_meta, head["rot"] if head else None, data["frames"])
         if not data["bones"]:
             continue
         if data["maxDisplacement"] > 0.25 * height:
@@ -666,4 +799,9 @@ def port_character_animations(gd, meta_path: str, include_general=False, fps=30.
         k = "loop" if n.endswith("_loop") else "start" if n.endswith("_s") else "end" if n.endswith("_e") else "once"
         kinds[k] = kinds.get(k, 0) + 1
     log(f"  {len(written)} animation(s) ported: " + ", ".join(f"{v} {k}" for k, v in sorted(kinds.items())))
+    try:   # swing-bone physics, oriented by the same export pose as the animations
+        from .physics import port_physics
+        port_physics(gd, meta_path, log, skel=skel, ex=ex)
+    except Exception as e:
+        log(f"  physics skipped: {e}")
     return written
