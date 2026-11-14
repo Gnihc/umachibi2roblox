@@ -43,6 +43,7 @@ Roblox has no custom shaders, so the look is baked into the model:
 |---|---|
 | Anime 2-tone shadow | Cel shadow baked into the texture, using Uma's own `*_shad_c` shadow colour when UmaViewer exported it. **Flat** mode = no shadow at all |
 | No Roblox shading gradient | Every vertex normal points up, so Roblox lights the whole model evenly |
+| Toon light (sun and shade) | Even light alone washes out in full sun and turns blue-grey in shade. On import and Apply the plugin gives each opaque textured part a `SurfaceAppearance` (`UmaToonLight`): a **tint** (default 0.6) darkens the sunlit side, and a low **emissive** (default 0.5) keeps shade in the texture's own colours. Shadows still fall on the rig, only softer. The emissive needs a plain white mask image, which the plugin uploads to your account once. Cheek, mayu and tear sprites keep their plain mesh texture. Both values are in the plugin panel; click Apply again after changing them |
 | Outline | Inverted-hull `Outline` mesh, skinned to the same bones |
 | No cast shadows | Plugin sets `CastShadow = false` |
 | No PBR shine | Metal 0 / rough 1, plus an optional place-wide `EnvironmentSpecularScale = 0` button |
@@ -65,11 +66,15 @@ every conversion:
   and the motion is retargeted onto the GLB's bones → `Uma2Roblox_Export\anims\<model>\*.json`.
   Only **rotations** plus small position deltas (hips etc.) are sent; bone lengths always come from the rig
   in Studio, so the animation fits the imported/uploaded rig's size
-* **Ear motion**: each body clip's matching ear clip (`…/body/…/<clip>` → `…/facial/…/<clip>_ear`; the
-  `_ear_driven` ones aren't bone motion) is merged in, so ears move with the body. UmaViewer's PMX export drops all
+* **Ear motion**: each body clip's matching ear clip (`…/body/…/<clip>` → `…/facial/…/<clip>_ear`) is merged in,
+  so ears move with the body. Like the face clips, these don't rotate the ear bones: they move one locator per ear
+  pose and side, whose position is that pose's blend weight. The poses come from the character's
+  `ast_chr<id>_<costume>_ear_target` (16 poses per ear, Euler offsets per ear bone), and the converter blends them
+  into ear bone rotations. UmaViewer's PMX export drops all
   `Ear*` bones, so with *Options → Ear bones from game rig* on (default) the converter takes the ear bones from the
   mini head/hair prefab in your game data, adds them under `Head` in the GLB, and skins the ear part of the hair to
-  them (geometric weights that blend into the head at the ear base). Mini clips have no tail motion.
+  them (geometric weights that blend into the head at the ear base). Clips without ear poses keep the ears neutral.
+  Mini clips have no tail keys; the tail moves with the swing-bone physics.
 * **Facial expressions** (no runtime script needed): with *Options → Face expression variants* on (default),
   the converter turns each face part (left/right eye, mouth, left/right mayu) into one mesh holding every
   expression of the atlas: eyes 15, mouth 19, mayu 9. Each variant is a copy with its UVs shifted to its atlas
@@ -81,7 +86,8 @@ every conversion:
   It's a pure rotation, so it's unaffected by `Model:ScaleTo` (Roblox scales animation translations, never
   rotations). Expressions swap instantly through the normal Animator and preview in the Animation Editor. Keys are only written when an expression changes. The `_face` clips drive locators
   (`Gallop.DrivenKeyAnimation`): `Mouth_Ctrl`, `Eye_L_Ctrl`, `Eye_R_Ctrl`, `Mayu_L_Ctrl`, `Mayu_R_Ctrl` (and `Cheek_Ctrl`),
-  whose local **x = −expression index ÷ 100**. One-frame interpolation blips between expressions are dropped.
+  whose local **x = −expression index ÷ 100**. Clips without a `_face` clip (most General *event* clips, and `idle01`) are keyed with
+  the default expression, so they still own the face. One-frame interpolation blips between expressions are dropped.
   Material UV-offset channels are read as a fallback. If a clip uses channels the tool doesn't recognise, the log says
   so and writes `anims\<model>\_face_channels.json` for you to report.
 * **Root motion** (*Options → Root motion*): mini clips also move and turn the root `Position` bone through
@@ -102,6 +108,12 @@ skeleton, so they play on any model. Click **General animations…** in the app,
 * **Attach to next export**: they're ported with the next model you export (tick *Keep picks for every export*
   to add them to every export), or
 * **Port now** onto a model you already converted.
+
+General clips get the same ear, face and root handling as the character's own clips. Many General clips have no
+`_ear`/`_face` clip in the game at all (the game sets those from the scene), so they show neutral ears and the
+default face. Circle and mode clips put each chibi on its seat in the scene by offsetting the Hip. With *Root motion*
+**inplace**, a clip (or `_s`/`_loop`/`_e` set) whose hip never comes near the rig's centre is moved back to the
+centre, like the character's own clips. Its height (sitting, lying) and its own movement are kept.
 
 Each model remembers its General clips in its sidecar (`"generalClips"`), so re-porting it later keeps them.
 **Port animations for converted** adds the current picks to every converted model. From the command line:
@@ -130,8 +142,30 @@ Studio plugin, then start `Uma2Roblox.exe`. `Uma2Roblox-cli.exe` is the command-
    and the default folder. The app converts it within a couple of seconds and moves on to the next one.
 4. In Studio: **File → Import 3D** → pick the `.glb` files → Import.
 5. Select the imported model(s) → **Uma2Roblox** plugin → **Apply Uma Toon to selection**.
-   It turns off shadows, faces the model forward, scales it to the target height (4 studs), and tags
-   it `UmaCharaId` / `UmaCostume`.
+   It turns off shadows, faces the model forward, and tags it `UmaCharaId` / `UmaCostume`. The model
+   keeps its imported size; use `Model:ScaleTo` to resize it (HipHeight scales with it).
+
+### Playable character (idle and emotes)
+With **Make the rig playable when importing animations** on (the default), importing a rig's animations
+also turns it into a character:
+* `RootPart` → `HumanoidRootPart`: a slim square column as wide as the torso, from 20% of the body's
+  height above the soles to the top of the head. That gap is the R15 `Humanoid`'s HipHeight, so the legs
+  step over stairs and only the root collides. The `AnimationController` is replaced by the Humanoid's `Animator`.
+* An `UmaAnimate` folder in the Animate script's format: `idle` (the outfit's own idle if it has one,
+  else `idle01`, its `_loop` clip) and an `Emotes` folder with an `Emote<n>` for every other clip set of the
+  character (`res`, `mot`, `act`, …, from all its outfits, e.g. `chr1005_20_res01`): `Start` = `<x>_s`,
+  `Loop` = `<x>_loop`. Reactions come first, then `mot`, `act` and the rest; each `Emote<n>`'s value says which
+  clip it is (`res01`, `mot01`, `res01 (costume 20)`).
+* The Animations' `AnimationId`s stay empty until you upload them: **Upload rig animations (selection; asks
+  first)** shows what it would upload and to whom right under the button, with **Upload** / **Cancel**. It
+  uploads those tracks as assets owned by the place's owner (its group, or its user) and writes the ids into
+  `UmaAnimate`. Needs Studio's *CreateAssetAsync Luau API* beta feature. **Import Uma animations** and **Upload
+  rig animations** are the highlighted buttons in the panel.
+
+Copy the rig to `StarterPlayer` as `StarterCharacter`. An Animate script that reads `UmaAnimate` uses its
+idle, and `/e Emote<n>` (`/e Emote` = a random one from `UmaAnimate.Emotes`) plays `Start`, then holds `Loop`
+until the player moves. `/e Dance` plays a random dance from the Animate script's own `Dances` folder (the same
+for every character), `/e Dance1` the one named `Dance1` there.
 6. Click **Sync with Uma2Roblox app** (allow the localhost request the first time). Those characters
    are now marked *in Studio* and drop off the "not ported" list.
 
@@ -148,14 +182,38 @@ asset id in the panel. The button:
 * tags the selected rigs `UmaChibi`, or every Uma rig in the place when none is selected. Imported and Applied
   models get the tag automatically (option **Tag rigs 'UmaChibi' on import and Apply**).
 
-Tune the feel at the top of `UmaChibiSmartBone` (`SETTINGS`, `ROTATION_LIMIT`, `EXCLUDE`), or per rig with
-SmartBone attributes on its RootPart (`Stiffness`, `Damping`, `Gravity`, …); attributes already set win.
+**The game's own physics values.** When the app ports a model's animations (or converts it), it also reads the
+costume's swing-bone settings from the game: the CySpring data in the mini's body, head and tail *cloth*
+prefabs, with per-bone stiffness, drag, gravity, collision radius and angle limits, plus the body colliders
+(head, chest, arms, hips, thighs, knees) each chain collides with. They're stored in the model's sidecar
+(`"physics"`). Re-read them for models converted earlier with `Uma2Roblox.exe physics Uma_….json` (or **Port
+animations** again). In Studio, with **Import the game's swing-bone physics** on, import and **Apply Uma Toon**
+write them onto the rig's bones (`UmaSpring*` attributes). At runtime `UmaChibiSmartBone` turns them into
+SmartBone settings per chain, so braids are heavy and damped, ribbons light, the skirt soft, the tail loose and
+the bust springy. It also adds the game's colliders as invisible parts that follow the body, each chain colliding
+only with the ones the game gives it. Rigs without game values fall back to `SETTINGS`.
+
+Tune the feel at the top of `UmaChibiSmartBone`: `GAME` maps the game's values (stiffness, damping, gravity
+scale, minimum angle limit, colliders on/off); `SETTINGS`, `ROTATION_LIMIT` and `EXCLUDE` cover rigs without
+game values. Or set SmartBone attributes yourself: on the RootPart for the whole rig, on a chain's root bone
+for that chain (`Stiffness`, `Damping`, `SpringColliders`), or on single bones (`Gravity`, `Radius`,
+`RotationLimit`). Attributes already set always win.
+
+### One face for a whole clip
+
+The **Uma Face** toolbar button (or **Open face editor** in the plugin) opens a panel with sliders for the mayu
+(eyebrows), eyes and mouth sprites; **Same sprite for left and right** can be turned off for winks. Select a clip,
+either a KeyframeSequence in `ServerStorage.RBX_ANIMSAVES` or an Animation in a rig's `UmaAnimate` folder. The last
+one selected stays loaded and the sliders preview on its rig. **Apply to whole clip** replaces every mayu, eye and
+mouth key in the clip with the chosen face from the first frame to the last (blinks included; Ctrl+Z undoes it). The
+rig's tracks of that clip then lose their asset id, so **Upload rig animations** sends the new face.
 
 Already have PMX files? Use **Convert PMX file…**, or from the command line:
 ```
 Uma2Roblox.exe convert "1001_Special Week.pmx"
 Uma2Roblox.exe list --unported
 Uma2Roblox.exe anims Uma2Roblox_Export\Uma_1001_00_Special_Week.json
+Uma2Roblox.exe physics Uma2Roblox_Export\Uma_1001_00_Special_Week.json
 ```
 
 **Diagnostics:** `inspect` writes a small JSON report of what a character's mini clips animate (body, `_face`,
@@ -179,10 +237,10 @@ py -3 uma2roblox.py inspect "<game data>\dat\AB\ABCDEF…"   (raw files from the
 
 ## Files
 * `u2r/`: the app (`pmx.py` reader, `convert.py` toon/GLB converter, `catalog.py` characters,
-  `gamedata.py` meta/bundle reading, `anim.py` clip decoding + retargeting,
-  `registry.py` ported list + Studio sync server, `gui.py`)
+  `gamedata.py` meta/bundle reading, `anim.py` clip decoding + retargeting, `physics.py` swing-bone physics
+  from the cloth prefabs, `registry.py` ported list + Studio sync server, `gui.py`)
 * `roblox/Uma2Roblox.plugin.lua`: Studio plugin
-* `tests/`: `make_test_pmx.py` (fake UmaViewer-style PMX), `test_anim.py`, `test_pipeline.py`
+* `tests/`: `make_test_pmx.py` (fake UmaViewer-style PMX), `test_anim.py`, `test_pipeline.py`, `test_physics.py`
 * `extras/unity-editor-tool/`: optional variant for the UmaViewer *source* project in Unity
 
 ## License

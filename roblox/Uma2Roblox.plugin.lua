@@ -21,6 +21,9 @@
 	      - writes StarterPlayerScripts.UmaChibiSmartBone, which at runtime gives every rig tagged "UmaChibi"
 	        SmartBone physics on its Sp_* bones (ears left to their animations)
 	      - tags the selected rigs (else every Uma rig in the place) "UmaChibi"; import and Apply tag them too
+	  * with "Import the game's swing-bone physics" on, import and Apply also fetch the costume's own CySpring
+	    values from the app (per-bone stiffness, drag, gravity, radius, angle limit, and the body colliders
+	    each chain collides with); the UmaChibiSmartBone runtime maps them to SmartBone per chain
 	  * "Sync with Uma2Roblox app" tells the app which characters are now in this place,
 	    so its list only shows characters that still need porting.
 ]]
@@ -33,8 +36,10 @@ local Lighting = game:GetService("Lighting")
 local SYNC_URL = "http://localhost:34891/uma2roblox"
 local SETTINGS_KEY = "Uma2Roblox_Settings_v1"
 
+local TOON_TINT_DEFAULT = 0.6
+local TOON_EMISSIVE_DEFAULT = 0.5
+
 local cfg = plugin:GetSetting(SETTINGS_KEY) or {}
-cfg.targetHeight = cfg.targetHeight or 4
 cfg.highlightOutline = cfg.highlightOutline or false
 if cfg.autoAnimations == nil then
 	cfg.autoAnimations = true
@@ -53,7 +58,22 @@ end
 if cfg.tagUmaChibi == nil then
 	cfg.tagUmaChibi = true
 end
+if cfg.importPhysics == nil then
+	cfg.importPhysics = true
+end
 cfg.smartBoneAssetId = tonumber(cfg.smartBoneAssetId) or 0
+if cfg.includeFaceLock == nil then
+	cfg.includeFaceLock = true
+end
+if cfg.playableRig == nil then
+	cfg.playableRig = true
+end
+if cfg.toonLight == nil then
+	cfg.toonLight = true
+end
+cfg.toonTint = tonumber(cfg.toonTint) or TOON_TINT_DEFAULT
+cfg.toonEmissive = tonumber(cfg.toonEmissive) or TOON_EMISSIVE_DEFAULT
+cfg.emissiveMaskId = tonumber(cfg.emissiveMaskId) or 0
 local function saveSettings()
 	plugin:SetSetting(SETTINGS_KEY, cfg)
 end
@@ -160,11 +180,29 @@ local function faceFront(model)
 	end
 end
 
--- The importer's RootPart is a big box around the whole scene, centred on the hip. Fit it to the body instead:
--- from the soles to the top of the head, as wide and deep as the head (hair, ears and the arms' T-pose span
--- left out), so the model is easy to grab, place and collide. Bones and joints hang off the RootPart, so their
--- offsets are moved the other way: nothing else moves, and animations stay valid (a pure translation of the
--- root; its rotation is kept). The pivot goes to the soles, so PivotTo puts the feet on the ground.
+-- The importer's RootPart is a big box around the whole scene, centred on the hip. Fit it to the body instead, as a
+-- character's HumanoidRootPart: a slim column (truss-like, square) only as wide as the torso (the distance between
+-- the upper arms' roots, not the chibi head or the arms' T-pose span), from ROOT_LIFT of the body's height above
+-- the soles up to the top of the head. The gap below is the Humanoid's HipHeight: the legs float over steps
+-- instead of catching on them, and the Humanoid still stands the soles on the ground. Bones and joints hang off
+-- the RootPart, so their offsets are moved the other way: nothing else moves, and animations stay valid (a pure
+-- translation of the root; its rotation is kept). The pivot goes to the soles, so PivotTo puts the feet on the ground.
+local ROOT_LIFT = 0.2
+local ROOT_NAMES = { "HumanoidRootPart", "RootPart" }
+
+local function rootOf(model)
+	if model.PrimaryPart then
+		return model.PrimaryPart
+	end
+	for _, n in ipairs(ROOT_NAMES) do
+		local rp = model:FindFirstChild(n)
+		if rp and rp:IsA("BasePart") then
+			return rp
+		end
+	end
+	return nil
+end
+
 local function isHeadPart(part) -- the mini face mesh is the whole head skin: mtl_mchr0001_00_face0
 	return string.match(string.lower(part.Name), "_face%d+$") ~= nil
 end
@@ -178,8 +216,8 @@ local function isHairPart(part)
 end
 
 local function fitRootToBody(model)
-	local rp = model.PrimaryPart or model:FindFirstChild("RootPart")
-	if not (rp and rp:IsA("BasePart")) then
+	local rp = rootOf(model)
+	if not rp then
 		return false
 	end
 	local rootCf = rp.CFrame
@@ -219,8 +257,16 @@ local function fitRootToBody(model)
 		headLo = Vector3.new(lo.X + w.X / 3, lo.Y, lo.Z + w.Z / 3)
 		headHi = Vector3.new(hi.X - w.X / 3, hi.Y, hi.Z - w.Z / 3)
 	end
-	local size = Vector3.new(headHi.X - headLo.X, headHi.Y - sole, headHi.Z - headLo.Z)
-	local center = Vector3.new((headLo.X + headHi.X) / 2, sole + size.Y / 2, (headLo.Z + headHi.Z) / 2)
+	-- torso width: between the upper arms' roots; without arm bones, half the head
+	local width = (headHi.X - headLo.X) / 2
+	local armL, armR = model:FindFirstChild("Arm_L", true), model:FindFirstChild("Arm_R", true)
+	if armL and armR and armL:IsA("Bone") and armR:IsA("Bone") then
+		width = (rootCf:PointToObjectSpace(armL.WorldPosition) - rootCf:PointToObjectSpace(armR.WorldPosition)).Magnitude
+	end
+	local height = headHi.Y - sole
+	local lift = height * ROOT_LIFT
+	local size = Vector3.new(width, height - lift, width)
+	local center = Vector3.new((headLo.X + headHi.X) / 2, sole + lift + size.Y / 2, (headLo.Z + headHi.Z) / 2)
 
 	local offset = CFrame.new(center)
 	local inv = offset:Inverse()
@@ -247,13 +293,100 @@ local function fitRootToBody(model)
 	if cache then
 		cache:Destroy()
 	end
-	local newPivot = CFrame.new(rp.CFrame:PointToWorldSpace(Vector3.new(0, -size.Y / 2, 0))) * oldPivot.Rotation
+	local newPivot = CFrame.new(rp.CFrame:PointToWorldSpace(Vector3.new(0, -size.Y / 2 - lift, 0))) * oldPivot.Rotation
 	if model.PrimaryPart == rp then
 		rp.PivotOffset = rp.CFrame:ToObjectSpace(newPivot)
 	else
 		model.WorldPivot = newPivot
 	end
+	model:SetAttribute("UmaRootLift", lift / model:GetScale()) -- unscaled: the HipHeight at scale 1
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.HipHeight = lift
+	end
 	return true
+end
+
+-- Alpha-blended face sprites (cheek blush, eyebrows, tears). Eyes and mouth are opaque quads painted with the
+-- face's skin around them, so they are lit exactly like the face skin, or their quads show.
+local ALPHA_SPRITE_WORDS = { "mayu", "cheek", "tear" }
+local function isAlphaSprite(part)
+	local n = string.lower(part.Name)
+	for _, w in ipairs(ALPHA_SPRITE_WORDS) do
+		if string.find(n, w, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+-- Toon light. The app points every normal straight up, so Roblox lights the whole model evenly: the sun hits it
+-- flat-on (washed out at the usual Lighting.Brightness of 2-3) and in shade only the blue sky light is left (the
+-- grey/blue look). A SurfaceAppearance on each textured part fixes both: its Color darkens the lit side
+-- (toonTint), and a low emissive (toonEmissive, with a plain white mask) gives shade a floor in the texture's own
+-- colours. Shadows still fall on the rig, just softer. Final colour = texture * tint * (Roblox light + emissive).
+-- Alpha sprites keep the plain mesh texture (Transparency 0.02, see fixTransparency): in a SurfaceAppearance their
+-- transparent area shows (the cheek quad spans the whole face) and the emissive ignores alpha.
+local AssetService = game:GetService("AssetService")
+
+-- One 4x4 white image, uploaded to the user's account the first time it is needed and remembered in the settings.
+local function emissiveMask()
+	if cfg.emissiveMaskId > 0 then
+		return "rbxassetid://" .. cfg.emissiveMaskId
+	end
+	local ok, result, assetId = pcall(function()
+		local img = AssetService:CreateEditableImage({ Size = Vector2.new(4, 4) })
+		img:DrawRectangle(Vector2.zero, Vector2.new(4, 4), Color3.new(1, 1, 1), 0, Enum.ImageCombineType.Overwrite)
+		return AssetService:CreateAssetAsync(img, Enum.AssetType.Image, {
+			Name = "Uma2Roblox emissive mask",
+			Description = "Plain white emissive mask for Uma2Roblox toon rigs",
+		})
+	end)
+	if not ok or result ~= Enum.CreateAssetResult.Success or not assetId then
+		warn("[Uma2Roblox] could not upload the emissive mask image (" .. tostring(result) .. "); toon light without emissive")
+		return nil
+	end
+	cfg.emissiveMaskId = assetId
+	saveSettings()
+	return "rbxassetid://" .. assetId
+end
+
+-- Returns how many parts got the toon light.
+local function applyToonLight(model)
+	local parts = {}
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("MeshPart") and d.TextureID ~= "" and not isOutline(d) then
+			table.insert(parts, d)
+		end
+	end
+	if #parts == 0 then
+		return 0
+	end
+	local mask = cfg.toonEmissive > 0 and emissiveMask() or nil
+	local tint = Color3.new(cfg.toonTint, cfg.toonTint, cfg.toonTint)
+	local n = 0
+	for _, p in ipairs(parts) do
+		local sa = p:FindFirstChild("UmaToonLight")
+		if isAlphaSprite(p) then
+			if sa then
+				sa:Destroy()
+			end
+		else
+			if not (sa and sa:IsA("SurfaceAppearance")) then
+				sa = Instance.new("SurfaceAppearance")
+				sa.Name = "UmaToonLight"
+			end
+			sa.ColorMapContent = Content.fromUri(p.TextureID)
+			sa.Color = tint
+			sa.EmissiveMaskContent = mask and Content.fromUri(mask) or Content.none
+			sa.EmissiveStrength = cfg.toonEmissive
+			sa.EmissiveTint = Color3.new(1, 1, 1)
+			sa.AlphaMode = Enum.AlphaMode.Overlay
+			sa.Parent = p
+			n += 1
+		end
+	end
+	return n
 end
 
 local function applyToon(model)
@@ -288,14 +421,20 @@ local function applyToon(model)
 		end
 	end
 
-	faceFront(model)
-	if fitRootToBody(model) then -- before scaling: the importer's big RootPart box would count in the height
-		model:SetAttribute("UmaRootFitted", true)
+	local lit = 0
+	if cfg.toonLight then
+		lit = applyToonLight(model)
+	else -- turned off: back to the plain mesh textures
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("SurfaceAppearance") and d.Name == "UmaToonLight" then
+				d:Destroy()
+			end
+		end
 	end
 
-	local h = model:GetExtentsSize().Y
-	if cfg.targetHeight > 0 and h > 0 then
-		model:ScaleTo(model:GetScale() * cfg.targetHeight / h)
+	faceFront(model)
+	if fitRootToBody(model) then
+		model:SetAttribute("UmaRootFitted", true)
 	end
 
 	local hl = model:FindFirstChild("UmaOutlineHighlight")
@@ -319,7 +458,7 @@ local function applyToon(model)
 	if not model:GetAttribute("UmaSource") then
 		model:SetAttribute("UmaSource", model.Name) -- the .glb name, used to fetch its animations
 	end
-	return count
+	return count, lit
 end
 
 ---------------------------------------------------------------- animations
@@ -601,48 +740,63 @@ local function animSaveFolder(model)
 		saves.Name = "RBX_ANIMSAVES"
 		saves.Parent = ServerStorage
 	end
-	-- The Animation Editor ties a save folder to its rig through the ObjectValue's Value, not its name: copies
-	-- and re-imports of a rig share a name, so the folder must point at THIS rig instance. In order:
-	--  1. the folder the Animation Editor already linked to the rig (rig.AnimSaves.Value -> folder)
-	--  2. a folder whose Value is this rig (the fullest one, if there are several)
-	--  3. a same-named folder whose rig is gone (Value nil, or an instance no longer in the place, e.g. the
-	--     rig was deleted or re-imported): re-pointed at this rig
-	--  4. a new folder
+	-- The Animation Editor ties a save folder to its rig through the ObjectValue's Value (and the rig's own
+	-- "AnimSaves" link), not its name: copies and re-imports of a rig share a name, so the folder must belong to
+	-- THIS rig instance, the selected one. In order:
+	--  1. a folder whose Value is this rig (the fullest one, if there are several)
+	--  2. the folder the rig's AnimSaves link points to, if that folder's rig is gone (the rig is a copy of a
+	--     deleted one and carries its link): re-pointed at this rig
+	--  3. a new folder
+	-- A folder is never taken over by name: a same-named folder of a deleted rig (still in Studio's undo history)
+	-- belongs to that rig. Afterwards the rig's AnimSaves link points at the chosen folder, and other folders that
+	-- also point at this rig are merged into it, so the plugin and the Animation Editor use the same one.
 	local function live(inst)
 		return inst ~= nil and inst:IsDescendantOf(game)
 	end
-	local link = model:FindFirstChild("AnimSaves")
-	local linked = link and link:IsA("ObjectValue") and link.Value
-	if linked and linked:IsA("ObjectValue") and linked.Parent == saves and (linked.Value == model or not live(linked.Value)) then
-		linked.Value = model
-		return linked
-	end
-	local mine, orphan
+	local mine, others = nil, {}
 	for _, child in ipairs(saves:GetChildren()) do
-		if child:IsA("ObjectValue") then
-			if child.Value == model then
-				if not mine or #child:GetChildren() > #mine:GetChildren() then
-					mine = child
-				end
-			elseif child.Name == model.Name and not live(child.Value) then
-				if not orphan or #child:GetChildren() > #orphan:GetChildren() then
-					orphan = child
-				end
+		if child:IsA("ObjectValue") and child.Value == model then
+			table.insert(others, child)
+			if not mine or #child:GetChildren() > #mine:GetChildren() then
+				mine = child
 			end
 		end
 	end
-	if mine then
-		return mine
+	local link = model:FindFirstChild("AnimSaves")
+	if not mine then
+		local linked = link and link:IsA("ObjectValue") and link.Value
+		if linked and linked:IsA("ObjectValue") and linked.Parent == saves and not live(linked.Value) then
+			linked.Value = model
+			mine = linked
+		end
 	end
-	if orphan then
-		orphan.Value = model
-		return orphan
+	if not mine then
+		mine = Instance.new("ObjectValue")
+		mine.Name = model.Name
+		mine.Value = model
+		mine.Parent = saves
 	end
-	local holder = Instance.new("ObjectValue")
-	holder.Name = model.Name
-	holder.Value = model
-	holder.Parent = saves
-	return holder
+	for _, other in ipairs(others) do
+		if other ~= mine then
+			for _, clip in ipairs(other:GetChildren()) do
+				if not mine:FindFirstChild(clip.Name) then
+					clip.Parent = mine
+				end
+			end
+			if #other:GetChildren() == 0 then
+				other:Destroy()
+			else -- same-named clips in both: keep the duplicate folder, but unlink it from this rig
+				other.Value = nil
+			end
+		end
+	end
+	if not (link and link:IsA("ObjectValue")) then
+		link = Instance.new("ObjectValue")
+		link.Name = "AnimSaves"
+		link.Parent = model
+	end
+	link.Value = mine
+	return mine
 end
 
 -- Smooth out blinks: a jump straight between open and closed eyes gets one frame of an in-between sprite.
@@ -753,6 +907,370 @@ local function smoothBlinks(anim, headName)
 	return smoothed
 end
 
+-- Face sprite lock. Within a clip the face bones only ever sit at 0 or 180 degrees (Constant keys), but Roblox
+-- blends bone Transforms whenever tracks overlap: the fade of AnimationTrack:Play/Stop (0.1 s by default),
+-- AdjustWeight, and the hand-off between the _s / _loop / _e tracks. A blend of 0 and 180 degrees is a turn,
+-- so the eyes, mouth and mayu visibly rotate. A LocalScript snaps every Face_* bone of rigs tagged
+-- "UmaChibiFace" back to 0 or 180 degrees each frame, after the Animator has run.
+local FACE_TAG = "UmaChibiFace"
+local FACE_SCRIPT = "UmaChibiFaceLock"
+local FACE_RUNTIME = [==[
+-- Generated by the Uma2Roblox plugin (written when it imports animations; importing again rewrites this script).
+-- Face sprites (Face_<part>_<n> bones: eyes, mouth, mayu...) swap expressions with instant 180-degree turns.
+-- Roblox blends bone poses whenever animation tracks fade in or out (Play/Stop fadeTime, 0.1 s by default) or
+-- are weighted, which turns the sprites visibly. Every frame, after the Animator, this snaps each face bone of
+-- rigs tagged "UmaChibiFace" to whichever of 0 or 180 degrees the blend is closer to.
+local CollectionService = game:GetService("CollectionService")
+local RunService = game:GetService("RunService")
+
+local TAG = "UmaChibiFace"
+local PREFIX = "Face_"
+local TURN = math.pi - 1e-3 -- the plugin keys the turn just under 180 degrees (a clean rotation axis)
+local REST_COS = math.cos(1e-3) -- closer than this to 0 / 180 degrees: already snapped, left alone
+local TURN_COS = math.cos(math.pi - 2e-3)
+
+local rigs = {} -- model -> { bones }, connections
+
+local function isFaceBone(inst)
+	return inst:IsA("Bone") and string.sub(inst.Name, 1, #PREFIX) == PREFIX
+end
+
+local function add(model)
+	if rigs[model] or not model:IsA("Model") then
+		return
+	end
+	local entry = { bones = {} }
+	for _, d in ipairs(model:GetDescendants()) do
+		if isFaceBone(d) then
+			table.insert(entry.bones, d)
+		end
+	end
+	entry.added = model.DescendantAdded:Connect(function(d) -- streaming can deliver bones later
+		if isFaceBone(d) then
+			table.insert(entry.bones, d)
+		end
+	end)
+	rigs[model] = entry
+end
+
+local function remove(model)
+	local entry = rigs[model]
+	if entry then
+		entry.added:Disconnect()
+		rigs[model] = nil
+	end
+end
+
+-- The bone's local animation Transform, snapped: a rotation of angle A about axis a becomes the rest pose if
+-- A < 90 degrees, else the 180-degree turn about a. nil if it needs no change.
+local function snapped(t)
+	local _, _, _, r00, r01, r02, r10, r11, r12, r20, r21, r22 = t:GetComponents()
+	local c = (r00 + r11 + r22 - 1) / 2
+	if c > REST_COS or c < TURN_COS then
+		return nil
+	end
+	if c >= 0 then
+		return CFrame.new(t.Position)
+	end
+	-- axis: (R + R^T) / 2 - cos(A) I = (1 - cos A) a a^T, whose longest column lies along a (well conditioned near
+	-- 180 degrees); its sign from the skew part (R - R^T) / 2 = sin(A) [a]x
+	local best
+	for _, col in ipairs({
+		Vector3.new(r00 - c, (r10 + r01) / 2, (r20 + r02) / 2),
+		Vector3.new((r01 + r10) / 2, r11 - c, (r21 + r12) / 2),
+		Vector3.new((r02 + r20) / 2, (r12 + r21) / 2, r22 - c),
+	}) do
+		if not best or col.Magnitude > best.Magnitude then
+			best = col
+		end
+	end
+	if best.Magnitude < 1e-6 then
+		return nil
+	end
+	local axis = best.Unit
+	if axis:Dot(Vector3.new(r21 - r12, r02 - r20, r10 - r01)) < 0 then
+		axis = -axis
+	end
+	return CFrame.new(t.Position) * CFrame.fromAxisAngle(axis, TURN)
+end
+
+-- PreSimulation runs after the Animator has written this frame's Transforms; they hold until the next frame.
+RunService.PreSimulation:Connect(function()
+	for model, entry in pairs(rigs) do
+		if model:IsDescendantOf(workspace) then
+			for _, bone in ipairs(entry.bones) do
+				local s = snapped(bone.Transform)
+				if s then
+					bone.Transform = s
+				end
+			end
+		end
+	end
+end)
+
+CollectionService:GetInstanceAddedSignal(TAG):Connect(add)
+CollectionService:GetInstanceRemovedSignal(TAG):Connect(remove)
+for _, model in ipairs(CollectionService:GetTagged(TAG)) do
+	add(model)
+end
+]==]
+
+-- Tags the rig and writes the runtime into StarterPlayerScripts. The script is replaced, not edited, as with
+-- SmartBone (a new Source in an existing script did not always reach playtests).
+-- Returns "current" (already there and up to date), "added" or "updated".
+local function installFaceLockScript()
+	local sps = game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts")
+	local old = sps:FindFirstChild(FACE_SCRIPT)
+	if old and old:IsA("LuaSourceContainer") and old.Source == FACE_RUNTIME then
+		return "current"
+	end
+	if old then
+		old:Destroy()
+	end
+	local runtime = Instance.new("LocalScript")
+	runtime.Name = FACE_SCRIPT
+	runtime.Source = FACE_RUNTIME
+	runtime.Parent = sps
+	return old and "updated" or "added"
+end
+
+-- true if the model has face sprite bones (it was tagged)
+local function tagFaceLock(model)
+	local CollectionService = game:GetService("CollectionService")
+	local hasFace = false
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("Bone") and string.sub(d.Name, 1, 5) == "Face_" then
+			hasFace = true
+			break
+		end
+	end
+	if hasFace and not CollectionService:HasTag(model, FACE_TAG) then
+		CollectionService:AddTag(model, FACE_TAG)
+	end
+	return hasFace
+end
+
+local function installFaceLock(model)
+	tagFaceLock(model)
+	if cfg.includeFaceLock then
+		installFaceLockScript()
+	end
+end
+
+-- Playable character. Imported animations make the rig a character the Animate script can drive (it keeps its
+-- name; copy it to StarterPlayer as StarterCharacter): the root part becomes HumanoidRootPart (before the
+-- KeyframeSequences are built, as their root Pose is named after it), the AnimationController goes, and a Humanoid
+-- with an Animator takes its place. R15, so the Humanoid holds the root at HipHeight (the lift fitRootToBody left
+-- under the root) and the soles on the ground. Only the root collides; the meshes are massless and pass through.
+local function makePlayable(model)
+	local rp = rootOf(model)
+	if not rp then
+		return false
+	end
+	rp.Name = "HumanoidRootPart"
+	model.PrimaryPart = rp
+	rp.Transparency = 1
+	rp.CanCollide = true
+	rp.Massless = false
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("AnimationController") then
+			d:Destroy()
+		elseif d:IsA("BasePart") and d ~= rp then
+			d.CanCollide = false
+			d.CanTouch = false
+			d.Massless = true
+		end
+	end
+	if fitRootToBody(model) then -- again, also for rigs fitted by older versions (head-wide, from the soles)
+		model:SetAttribute("UmaRootFitted", true)
+	end
+	local hum = model:FindFirstChildOfClass("Humanoid")
+	if not hum then
+		hum = Instance.new("Humanoid")
+		hum.Parent = model
+	end
+	hum.RigType = Enum.HumanoidRigType.R15
+	hum.RequiresNeck = false -- no Neck joint: bones, not Motor6Ds
+	hum.BreakJointsOnDeath = false
+	hum.AutomaticScalingEnabled = false
+	local lift = model:GetAttribute("UmaRootLift")
+	if lift then
+		hum.HipHeight = lift * model:GetScale()
+	end
+	if not hum:FindFirstChildOfClass("Animator") then
+		Instance.new("Animator").Parent = hum
+	end
+	return true
+end
+
+-- The rig's own animations for the place's Animate script, in its format (a StringValue per animation set holding
+-- Animation instances, each with an optional Weight NumberValue), in a "UmaAnimate" folder on the rig:
+--   idle    the costume's own idle if it has one (alt outfits), else the character's idle01 (its _loop clip)
+--   Emotes.Emote<n>  one per non-idle clip set of the character (res, mot, act, ..., from every outfit), in an
+--           "Emotes" folder: Animation "Start" (<x>_s) then "Loop" (<x>_loop), played by /e Emote<n> (/e Emote = a
+--           random one). Numbered res first, then mot, act, others; this outfit, the base outfit, then the others.
+--           The StringValue's Value says which clip it is ("res01", "mot01", "res01 (costume 20)").
+-- AnimationIds start empty; "Upload rig animations" fills them in, and importing again keeps them for clips that
+-- did not change.
+local ANIMATE_FOLDER = "UmaAnimate"
+local EMOTES_FOLDER = "Emotes"
+
+-- FNV-1a of a string, as hex: tells an uploaded clip from a changed one when the rig is imported again.
+local function fingerprint(s)
+	local h = 2166136261
+	for i = 1, #s, 4096 do
+		for _, b in ipairs({ string.byte(s, i, math.min(i + 4095, #s)) }) do
+			h = bit32.bxor(h, b)
+			h = (bit32.lshift(h, 24) + h * 403) % 4294967296 -- h * 16777619 (2^24 + 403), mod 2^32
+		end
+	end
+	return string.format("%08x", h)
+end
+
+local function buildAnimateFolder(model, names, holder)
+	local id, costume = parseName(model.Name)
+	id = model:GetAttribute("UmaCharaId") or id
+	costume = model:GetAttribute("UmaCostume") or costume or "00"
+	local have = {}
+	for _, n in ipairs(names) do
+		have[n] = true
+	end
+	-- clips of this character: kind ("idle"/"res"/"mot"/"act"/...) -> number -> { [costume] = clip name prefix }
+	local found = { idle = {} }
+	local families = {} -- every non-idle <x>_s/_loop family, any costume: emotes
+	for _, n in ipairs(names) do
+		local base = string.match(n, "^(.-)_s$") or string.match(n, "^(.-)_loop$")
+		local cid, c, kind, num
+		if base then
+			cid, c, kind, num = string.match(base, "chr(%d+)_(%w+)_(%a+)(%d+)$")
+		end
+		if cid and (not id or tonumber(cid) == id) then
+			local k = tonumber(num)
+			if kind == "idle" then
+				if c == costume or c == "00" then
+					found.idle[k] = found.idle[k] or {}
+					found.idle[k][c] = base
+				end
+			elseif not families[base] then
+				families[base] = { kind = kind, num = k, costume = c }
+			end
+		end
+	end
+	local function pick(byCostume)
+		return byCostume[costume] or byCostume["00"]
+	end
+	-- Rebuilding must not lose ids already uploaded: an Animation keeps its id when its clip is unchanged (same
+	-- fingerprint as when it was uploaded); a changed clip starts empty again so it gets uploaded anew.
+	local kept = {}
+	local old = model:FindFirstChild(ANIMATE_FOLDER)
+	if old then
+		for _, a in ipairs(old:GetDescendants()) do
+			local clip = a:IsA("Animation") and a:GetAttribute("UmaClip")
+			if clip and a.AnimationId ~= "" then
+				kept[clip] = { id = a.AnimationId, hash = a:GetAttribute("UmaClipHash"), to = a:GetAttribute("UmaUploadedTo") }
+			end
+		end
+		old:Destroy()
+	end
+	local folder = Instance.new("Folder")
+	folder.Name = ANIMATE_FOLDER
+	local function animation(parent, name, clip, weight)
+		local a = Instance.new("Animation")
+		a.Name = name
+		a.AnimationId = ""
+		a:SetAttribute("UmaClip", clip)
+		local k = kept[clip]
+		local ks = holder and holder:FindFirstChild(clip)
+		if k and (k.hash == nil or (ks and ks:GetAttribute("UmaClipHash") == k.hash)) then
+			a.AnimationId = k.id
+			a:SetAttribute("UmaClipHash", k.hash)
+			a:SetAttribute("UmaUploadedTo", k.to)
+		end
+		if weight then
+			local w = Instance.new("NumberValue")
+			w.Name = "Weight"
+			w.Value = weight
+			w.Parent = a
+		end
+		a.Parent = parent
+		return a
+	end
+	-- idle: the costume's own lowest-numbered idle, else idle01 of the base outfit
+	local idleClip
+	local nums = {}
+	for k in pairs(found.idle) do
+		table.insert(nums, k)
+	end
+	table.sort(nums)
+	for _, k in ipairs(nums) do
+		if found.idle[k][costume] then
+			idleClip = found.idle[k][costume]
+			break
+		end
+	end
+	idleClip = idleClip or (found.idle[1] and pick(found.idle[1]))
+	if not idleClip and #nums > 0 then
+		idleClip = pick(found.idle[nums[1]])
+	end
+	local count = 0
+	if idleClip then
+		local set = Instance.new("StringValue")
+		set.Name = "idle"
+		set.Parent = folder
+		-- the _loop clip is the idle cycle (_s is only the short lead-in, ~0.5 s); _s if there is no _loop
+		local suffix = have[idleClip .. "_loop"] and "_loop" or "_s"
+		animation(set, string.match(idleClip, "_(idle%d+)$") .. suffix, idleClip .. suffix, 1)
+		count += 1
+	end
+	-- emotes: res first (reactions), then mot, act and any other kind; this costume, then the base outfit, then
+	-- the character's other outfits. Value = what the clip is ("res01", "mot01", "res01 (costume 20)").
+	local kindRank = { res = 1, mot = 2, act = 3 }
+	local function costumeRank(c)
+		return c == costume and 0 or c == "00" and 1 or 2
+	end
+	local list = {}
+	for base, f in pairs(families) do
+		f.base = base
+		table.insert(list, f)
+	end
+	table.sort(list, function(a, b)
+		local ka, kb = kindRank[a.kind] or 9, kindRank[b.kind] or 9
+		if ka ~= kb then
+			return ka < kb
+		elseif a.kind ~= b.kind then
+			return a.kind < b.kind
+		elseif costumeRank(a.costume) ~= costumeRank(b.costume) then
+			return costumeRank(a.costume) < costumeRank(b.costume)
+		elseif a.costume ~= b.costume then
+			return a.costume < b.costume
+		end
+		return a.num < b.num
+	end)
+	local emotes
+	for i, f in ipairs(list) do
+		if not emotes then
+			emotes = Instance.new("Folder")
+			emotes.Name = EMOTES_FOLDER
+			emotes.Parent = folder
+		end
+		local set = Instance.new("StringValue")
+		set.Name = "Emote" .. i
+		set.Value = string.format("%s%02d", f.kind, f.num)
+			.. ((f.costume ~= costume and f.costume ~= "00") and (" (costume " .. f.costume .. ")") or "")
+		set.Parent = emotes
+		if have[f.base .. "_s"] then
+			animation(set, "Start", f.base .. "_s")
+			count += 1
+		end
+		if have[f.base .. "_loop"] then
+			animation(set, "Loop", f.base .. "_loop")
+			count += 1
+		end
+	end
+	folder.Parent = model
+	return count
+end
+
 local function importAnimations(model, report)
 	local source = model:GetAttribute("UmaSource") or model.Name
 	local index = fetchJson("/anims?model=" .. HttpService:UrlEncode(source))
@@ -760,8 +1278,10 @@ local function importAnimations(model, report)
 		report(source .. ": no animations ported yet (enable 'Port mini animations' in the app).")
 		return 0
 	end
-	-- rig needs an Animator to play
-	if not model:FindFirstChildWhichIsA("Humanoid", true) and not model:FindFirstChildWhichIsA("AnimationController") then
+	-- a character with a Humanoid; else at least an AnimationController, so the rig can play
+	if cfg.playableRig then
+		makePlayable(model)
+	elseif not model:FindFirstChildWhichIsA("Humanoid", true) and not model:FindFirstChildWhichIsA("AnimationController") then
 		local ac = Instance.new("AnimationController")
 		ac.Parent = model
 		Instance.new("Animator").Parent = ac
@@ -783,6 +1303,10 @@ local function importAnimations(model, report)
 			blinks += smoothBlinks(anim, headName)
 		end
 		local ks = buildSequence(anim, fit, bonesByName, order, model:GetScale())
+		local okJson, json = pcall(HttpService.JSONEncode, HttpService, anim)
+		if okJson then
+			ks:SetAttribute("UmaClipHash", fingerprint(json .. "|" .. tostring(model:GetScale())))
+		end
 		local old = holder:FindFirstChild(ks.Name)
 		if old then
 			old:Destroy()
@@ -793,11 +1317,204 @@ local function importAnimations(model, report)
 	if blinks > 0 then
 		report(string.format("%s: smoothed %d blink frame(s)", source, blinks))
 	end
+	if eye then -- the rig has face sprites: keep them from turning in animation blends
+		installFaceLock(model)
+	end
 	if holder.Value ~= model then -- never leave animations where the Animation Editor won't find them
 		warn(string.format("[Uma2Roblox] %s: save folder pointed elsewhere; re-linked it to this rig", model.Name))
 		holder.Value = model
 	end
+	if cfg.playableRig then
+		local tracks = buildAnimateFolder(model, index.animations, holder)
+		local pending = 0
+		for _, a in ipairs(model[ANIMATE_FOLDER]:GetDescendants()) do
+			if a:IsA("Animation") and a.AnimationId == "" then
+				pending += 1
+			end
+		end
+		if pending > 0 then
+			report(string.format("%s: %d track(s) in %s, %d without an AnimationId; click 'Upload rig animations'",
+				source, tracks, ANIMATE_FOLDER, pending))
+		else
+			report(string.format("%s: %d track(s) in %s, uploaded ids kept", source, tracks, ANIMATE_FOLDER))
+		end
+	end
 	return n, holder
+end
+
+-- Uploads the rig's UmaAnimate tracks that have no AnimationId yet and writes the returned ids into them. Assets
+-- go to the place's owner (its group, or the user who owns it), not whoever is editing; an unpublished place has
+-- no owner, so they go to the editing user. Needs Studio's "CreateAssetAsync Luau API" beta feature.
+local BETA_HINT = 'Turn on File > Beta Features > "CreateAssetAsync Luau API", restart Studio, then try again.'
+
+local function placeOwner()
+	if game.CreatorId and game.CreatorId > 0 then
+		if game.CreatorType == Enum.CreatorType.Group then
+			return game.CreatorId, Enum.AssetCreatorType.Group, "group " .. game.CreatorId
+		end
+		return game.CreatorId, Enum.AssetCreatorType.User, "user " .. game.CreatorId
+	end
+	return nil, nil, "you (the place is not published, so it has no owner)"
+end
+
+local function pendingUploads(model)
+	local list = {}
+	local folder = model:FindFirstChild(ANIMATE_FOLDER)
+	if folder then
+		for _, a in ipairs(folder:GetDescendants()) do
+			if a:IsA("Animation") and a.AnimationId == "" and a:GetAttribute("UmaClip") then
+				table.insert(list, a)
+			end
+		end
+	end
+	return list
+end
+
+local function uploadRigAnimations(model, report)
+	local list = pendingUploads(model)
+	if #list == 0 then
+		return 0, {}
+	end
+	local holder = animSaveFolder(model)
+	local creatorId, creatorType, ownerText = placeOwner()
+	local source = model:GetAttribute("UmaSource") or model.Name
+	local done, failed, uploaded = 0, {}, {}
+	for i, a in ipairs(list) do
+		local clip = a:GetAttribute("UmaClip")
+		local ks = holder:FindFirstChild(clip)
+		if not (ks and ks:IsA("KeyframeSequence")) then
+			table.insert(failed, clip .. ": not in " .. holder:GetFullName() .. " (import the animations again)")
+			continue
+		end
+		report(string.format("%s: uploading %d/%d %s", source, i, #list, clip))
+		local copy = ks:Clone()
+		-- idle repeats through the Animate script's DidLoop; an emote's Start plays once, then its Loop holds
+		copy.Loop = a.Name ~= "Start"
+		local params = {
+			Name = string.sub(string.gsub(source, "^Uma_", "") .. " " .. a.Parent.Name .. " " .. a.Name, 1, 50),
+			Description = "Uma2Roblox: " .. clip,
+		}
+		if creatorId then
+			params.CreatorId = creatorId
+			params.CreatorType = creatorType
+		end
+		local ok, result, assetId = pcall(function()
+			return AssetService:CreateAssetAsync(copy, Enum.AssetType.Animation, params)
+		end)
+		copy:Destroy()
+		if ok and result == Enum.CreateAssetResult.Success and assetId then
+			table.insert(uploaded, { a = a, id = "rbxassetid://" .. tostring(assetId), hash = ks:GetAttribute("UmaClipHash") })
+		else
+			local why = tostring(ok and result or result)
+			local l = string.lower(why)
+			if string.find(l, "beta", 1, true) or string.find(l, "not enabled", 1, true)
+				or string.find(l, "not available", 1, true) or string.find(l, "createassetasync", 1, true) then
+				why ..= "\n" .. BETA_HINT
+			end
+			table.insert(failed, clip .. ": " .. why)
+			if not ok then
+				break -- an API error (beta off, no permission) fails every upload the same way
+			end
+		end
+	end
+	-- The uploads yield for seconds each, so the ids are written afterwards in one short undo step (a recording
+	-- held open across the network waits can be cut off by other edits and take the ids with it), then checked.
+	record("Uma2Roblox: set uploaded animation ids", function()
+		for _, u in ipairs(uploaded) do
+			if not u.a:IsDescendantOf(model) then -- the folder was rebuilt meanwhile: use its Animation for the clip
+				local clip = u.a:GetAttribute("UmaClip")
+				for _, b in ipairs(pendingUploads(model)) do
+					local ks = holder:FindFirstChild(clip)
+					if b:GetAttribute("UmaClip") == clip and b.Name == u.a.Name
+						and ks and ks:GetAttribute("UmaClipHash") == u.hash then
+						u.a = b
+						break
+					end
+				end
+			end
+			local a = u.a
+			if a:IsDescendantOf(model) then
+				a.AnimationId = u.id
+				a:SetAttribute("UmaClipHash", u.hash)
+				a:SetAttribute("UmaUploadedTo", ownerText)
+			end
+		end
+	end)
+	for _, u in ipairs(uploaded) do
+		local a = u.a
+		local clip = a:GetAttribute("UmaClip")
+		if not a:IsDescendantOf(model) then
+			table.insert(failed, string.format("%s: uploaded as %s, but its Animation left %s during the upload "
+				.. "(re-imported?); paste the id in by hand", clip, u.id, ANIMATE_FOLDER))
+		elseif a.AnimationId ~= u.id then
+			table.insert(failed, string.format("%s: uploaded as %s, but setting AnimationId did not stick (it reads '%s')",
+				clip, u.id, a.AnimationId))
+		else
+			done += 1
+		end
+	end
+	return done, failed
+end
+
+-- The game's own swing-bone (CySpring) physics, as the app reads it from the costume's cloth prefabs: per Sp_
+-- bone stiffness, drag, gravity, collision radius and angle limit, plus the body colliders the chains hit.
+-- Written onto the rig as plain game values (UmaSpring* attributes on the bones, lengths in GLB metres, colliders
+-- as JSON in bone space); the UmaChibiSmartBone runtime turns them into SmartBone settings, scaled to the rig's
+-- size at that moment, so the rig can be rescaled later.
+local SPRING_ATTRS = { "UmaSpringStiffness", "UmaSpringDrag", "UmaSpringGravity", "UmaSpringRadius", "UmaSpringLimit", "UmaSpringPart",
+	"UmaSpringCollideWith" }
+
+local function importPhysics(model)
+	local source = model:GetAttribute("UmaSource") or model.Name
+	local ok, data = pcall(fetchJson, "/physics?model=" .. HttpService:UrlEncode(source))
+	if not ok then
+		return nil, tostring(data)
+	end
+	local bonesByName = collectBones(model)
+	for _, b in pairs(bonesByName) do
+		for _, a in ipairs(SPRING_ATTRS) do
+			b:SetAttribute(a, nil)
+		end
+	end
+	local fit = fitSpace(data.skeleton, bonesByName)
+	local bones = 0
+	for _, chain in ipairs(data.chains or {}) do
+		local root = bonesByName[chain.root]
+		if root then -- the game's colliders for this chain (SmartBone would otherwise use all of them on every chain)
+			root:SetAttribute("UmaSpringCollideWith", table.concat(chain.colliders or {}, ","))
+		end
+		for _, b in ipairs(chain.bones) do
+			local bone = bonesByName[b.name]
+			if bone then
+				bone:SetAttribute("UmaSpringStiffness", b.stiffness)
+				bone:SetAttribute("UmaSpringDrag", b.drag)
+				bone:SetAttribute("UmaSpringGravity", b.gravity)
+				bone:SetAttribute("UmaSpringRadius", b.radius)
+				bone:SetAttribute("UmaSpringPart", chain.part)
+				if b.limit then -- cone angle: the widest of the x/y limits (z is twist)
+					local l = b.limit
+					bone:SetAttribute("UmaSpringLimit", math.max(l[1], l[2], l[4], l[5]))
+				end
+				bones += 1
+			end
+		end
+	end
+	local cols = {}
+	for _, c in ipairs(data.colliders or {}) do
+		local bone = bonesByName[c.bone]
+		if bone and not c.inner then -- SmartBone has no keep-inside colliders
+			local function loc(v)
+				local w = fit.R:VectorToWorldSpace(Vector3.new(v[1], v[2], v[3]))
+				local p = bone.WorldCFrame:VectorToObjectSpace(w)
+				return { p.X, p.Y, p.Z }
+			end
+			table.insert(cols, { name = c.name, bone = c.bone, type = c.type, a = loc(c.a), b = c.b and loc(c.b), radius = c.radius })
+		end
+	end
+	model:SetAttribute("UmaSpringColliders", HttpService:JSONEncode(cols))
+	model:SetAttribute("UmaStudsPerMetre", fit.s)
+	model:SetAttribute("UmaPhysicsScale", model:GetScale())
+	return bones, #cols
 end
 
 local function scanPlace()
@@ -836,9 +1553,12 @@ local SMARTBONE_SCRIPT = "UmaChibiSmartBone"
 local SMARTBONE_RUNTIME = [==[
 -- Generated by the Uma2Roblox plugin ("Integrate SmartBone 2"); clicking that button again rewrites this script.
 -- Every model tagged "UmaChibi" gets SmartBone 2 spring physics on its Sp_* bones, the swing bones of the
--- original game (hair, tail, ribbons, skirt/jacket, bust).
+-- original game (hair, tail, ribbons, skirt/jacket, bust). Rigs the plugin imported the game's own swing-bone
+-- physics for (UmaSpring* attributes) get per-chain values and the game's colliders; others get SETTINGS below.
 local CollectionService = game:GetService("CollectionService")
+local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local TAG = "UmaChibi"
 local ROOT_PREFIX = "Sp_"
@@ -857,6 +1577,19 @@ local SETTINGS = {
 }
 -- Most a spring bone may swing away from its parent's direction, in degrees (set on each Sp_ bone unless set)
 local ROTATION_LIMIT = 60
+-- The game's CySpring values -> SmartBone. Stiffness and drag are per chain (the mean over its bones, set on the
+-- chain's root bone); gravity, collision radius and angle limit per bone. Lengths scale with the rig.
+local GAME = {
+	stiffness = function(k) -- game 90 (skirt) .. 150 (hair) .. 900 (ears): 0.47 .. 0.6 .. 0.9
+		return k / (k + 100)
+	end,
+	damping = function(drag) -- game 200 (tail) .. 500 (hair) .. 900 (braids): 0.08 .. 0.2 .. 0.36
+		return math.clamp(drag / 2500, 0.05, 0.6)
+	end,
+	gravity = 0.006, -- studs/s^2 per game gravity unit, per stud of rig per GLB metre (hair 300 -> ~3.3 on a 2-stud mini)
+	minLimit = 20, -- degrees: the game's limits are per axis around its own bone axes, this is one cone
+	colliders = true, -- the game's body colliders (head, chest, arms, hips, thighs, knees) push the chains out
+}
 
 local SmartBone = require(--[[SMARTBONE_PATH]])
 
@@ -897,9 +1630,127 @@ local function findRoots(rootPart)
 end
 
 local watching = {}
+local colliderSets = {} -- model -> { folder, connection }
+
+local function setDefault(inst, name, value)
+	if inst:GetAttribute(name) == nil then -- attributes set by hand win
+		inst:SetAttribute(name, value)
+	end
+end
+
+-- Studs per GLB metre for this rig now (the plugin measured it at import; the rig may have been rescaled since)
+local function studsPerMetre(model)
+	local spm = model:GetAttribute("UmaStudsPerMetre")
+	return spm and spm * model:GetScale() / (model:GetAttribute("UmaPhysicsScale") or 1)
+end
+
+local function removeColliders(model)
+	local set = colliderSets[model]
+	if set then
+		set.connection:Disconnect()
+		set.folder:Destroy()
+		colliderSets[model] = nil
+	end
+end
+
+-- The game's colliders as invisible SmartCollider parts that follow their (animated) body bones every frame.
+-- A ColliderKey keeps them to this rig's chains.
+local function buildColliders(model, rp, s)
+	removeColliders(model)
+	local ok, list = pcall(HttpService.JSONDecode, HttpService, model:GetAttribute("UmaSpringColliders") or "[]")
+	if not ok or #list == 0 then
+		return 0
+	end
+	local key = rp:GetAttribute("ColliderKey") or HttpService:GenerateGUID(false)
+	rp:SetAttribute("ColliderKey", key)
+	local folder = Instance.new("Folder")
+	folder.Name = "UmaSpringColliders " .. model.Name
+	local items = {}
+	for _, c in ipairs(list) do
+		local bone = rp:FindFirstChild(c.bone, true)
+		if bone and bone:IsA("Bone") then
+			local a = Vector3.new(c.a[1], c.a[2], c.a[3]) * s
+			local part = Instance.new("Part")
+			part.Name = c.name
+			part.Anchored, part.CanCollide, part.CanQuery, part.CanTouch = true, false, false, false
+			part.CastShadow, part.Transparency = false, 1
+			local offset
+			if c.type == "capsule" and c.b then -- SmartBone capsule: segment of length Size.X along local Z
+				local b = Vector3.new(c.b[1], c.b[2], c.b[3]) * s
+				local len = (b - a).Magnitude
+				offset = len > 1e-4 and CFrame.lookAt((a + b) / 2, b) or CFrame.new(a)
+				part.Size = Vector3.new(math.max(len, 1e-3), 2 * c.radius * s, 2 * c.radius * s)
+				part:SetAttribute("ColliderShape", "Capsule")
+			else
+				offset = CFrame.new(a)
+				part.Size = Vector3.one * (2 * c.radius * s)
+				part:SetAttribute("ColliderShape", "Sphere")
+			end
+			part:SetAttribute("ColliderKey", key)
+			part.CFrame = bone.TransformedWorldCFrame * offset
+			part.Parent = folder
+			CollectionService:AddTag(part, "SmartCollider")
+			table.insert(items, { part, bone, offset })
+		end
+	end
+	folder.Parent = workspace.CurrentCamera -- local to this client
+	local connection = RunService.PreSimulation:Connect(function()
+		for _, it in ipairs(items) do
+			it[1].CFrame = it[2].TransformedWorldCFrame * it[3]
+		end
+	end)
+	colliderSets[model] = { folder = folder, connection = connection }
+	return #items
+end
+
+-- Per-chain and per-bone SmartBone settings from the game's values; false if the rig has none.
+local function applyGamePhysics(model, rp, roots)
+	local s = studsPerMetre(model)
+	if not s then
+		return false
+	end
+	local any = false
+	for _, name in ipairs(roots) do
+		local root = rp:FindFirstChild(name, true)
+		if root then
+			local k, drag, n = 0, 0, 0
+			for _, b in ipairs({ root, unpack(root:GetDescendants()) }) do
+				if b:IsA("Bone") and b:GetAttribute("UmaSpringStiffness") then
+					k += b:GetAttribute("UmaSpringStiffness")
+					drag += b:GetAttribute("UmaSpringDrag") or 0
+					n += 1
+				end
+			end
+			if n > 0 then
+				setDefault(root, "Stiffness", GAME.stiffness(k / n))
+				setDefault(root, "Damping", GAME.damping(drag / n))
+				-- only the colliders the game gives this chain (the hair's "stay behind the back" spheres would
+				-- otherwise swallow the bust and the front of the skirt)
+				setDefault(root, "SpringColliders", GAME.colliders and root:GetAttribute("UmaSpringCollideWith") or "")
+				any = true
+			end
+		end
+	end
+	for _, d in ipairs(rp:GetDescendants()) do
+		if isSpring(d) and d:GetAttribute("UmaSpringStiffness") then
+			setDefault(d, "Radius", (d:GetAttribute("UmaSpringRadius") or 0) * s)
+			setDefault(d, "Gravity", Vector3.new(0, -(d:GetAttribute("UmaSpringGravity") or 0) * GAME.gravity * s, 0))
+			local limit = d:GetAttribute("UmaSpringLimit")
+			setDefault(d, "RotationLimit", limit and math.clamp(limit, GAME.minLimit, 180) or 180)
+		end
+	end
+	if any and GAME.colliders then
+		buildColliders(model, rp, s)
+	end
+	return any
+end
+
+local function rootOf(model)
+	return model.PrimaryPart or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("RootPart")
+end
 
 local function enable(model)
-	local rp = model.PrimaryPart or model:FindFirstChild("RootPart")
+	local rp = rootOf(model)
 	if not (rp and rp:IsA("BasePart")) or CollectionService:HasTag(rp, "SmartBone") then
 		return
 	end
@@ -911,23 +1762,23 @@ local function enable(model)
 		rp:SetAttribute("Roots", table.concat(roots, ","))
 	end
 	for k, v in pairs(SETTINGS) do
-		if rp:GetAttribute(k) == nil then
-			rp:SetAttribute(k, v)
-		end
+		setDefault(rp, k, v)
 	end
+	applyGamePhysics(model, rp, string.split(rp:GetAttribute("Roots"), ","))
 	for _, d in ipairs(rp:GetDescendants()) do
-		if isSpring(d) and d:GetAttribute("RotationLimit") == nil then
-			d:SetAttribute("RotationLimit", ROTATION_LIMIT)
+		if isSpring(d) then
+			setDefault(d, "RotationLimit", ROTATION_LIMIT)
 		end
 	end
-	CollectionService:AddTag(rp, "SmartBone")
+	CollectionService:AddTag(rp, "SmartBone") -- after the colliders: SmartBone gathers them when it sets up
 end
 
 local function disable(model)
-	local rp = model.PrimaryPart or model:FindFirstChild("RootPart")
+	local rp = rootOf(model)
 	if rp then
 		CollectionService:RemoveTag(rp, "SmartBone")
 	end
+	removeColliders(model)
 end
 
 -- Only rigs in Workspace move; templates in ReplicatedStorage are left alone until they are put in Workspace.
@@ -938,8 +1789,9 @@ local function watch(model)
 	watching[model] = true
 	local function update()
 		if model:IsDescendantOf(workspace) then
-			if not (model.PrimaryPart or model:FindFirstChild("RootPart")) then
-				model:WaitForChild("RootPart", 30) -- streaming: the RootPart can arrive after the model
+			local t0 = os.clock()
+			while not rootOf(model) and model.Parent and os.clock() - t0 < 30 do
+				task.wait(0.5) -- streaming: the root part can arrive after the model
 			end
 			if model:IsDescendantOf(workspace) and CollectionService:HasTag(model, TAG) then
 				enable(model)
@@ -1010,6 +1862,46 @@ local SB_PATCHES = {
 			.. "\treturn ParentBone.AnimatedWorldCFrame * BoneObject.TransformedCFrame",
 	},
 	{
+		path = {},
+		find = "local BoneTree = BoneTreeClass.new(RootBone, RootPart, Utilities.GatherObjectSettings(RootPart))",
+		replace = "local TreeSettings = Utilities.GatherObjectSettings(RootPart)\n"
+			.. "\t" .. SB_MARK .. ": per-chain settings (Stiffness, Damping, ...) from attributes on the chain's root bone\n"
+			.. '\tif RootPart:GetAttribute("RestAxisFromChild") then\n'
+			.. "\t\tfor Key, Value in TreeSettings do\n"
+			.. "\t\t\tlocal Override = RootBone:GetAttribute(Key)\n"
+			.. "\t\t\tif Override ~= nil and typeof(Override) == typeof(Value) then\n"
+			.. "\t\t\t\tTreeSettings[Key] = Override\n"
+			.. "\t\t\tend\n"
+			.. "\t\tend\n"
+			.. "\tend\n"
+			.. "\tlocal BoneTree = BoneTreeClass.new(RootBone, RootPart, TreeSettings)",
+	},
+	{
+		path = {},
+		find = "BoneTree:Constrain(self.ColliderObjects, UpdateHz)",
+		replace = SB_MARK .. ": per-chain colliders, named in the chain root's SpringColliders attribute\n"
+			.. "\t\tlocal TreeColliders = self.ColliderObjects\n"
+			.. "\t\tif BoneTree.ColliderFilter == nil then\n"
+			.. '\t\t\tlocal Names = BoneTree.Root and BoneTree.Root:GetAttribute("SpringColliders")\n'
+			.. "\t\t\tBoneTree.ColliderFilter = false\n"
+			.. '\t\t\tif typeof(Names) == "string" then\n'
+			.. "\t\t\t\tBoneTree.ColliderFilter = {}\n"
+			.. '\t\t\t\tfor _, Name in string.split(Names, ",") do\n'
+			.. "\t\t\t\t\tBoneTree.ColliderFilter[Name] = true\n"
+			.. "\t\t\t\tend\n"
+			.. "\t\t\tend\n"
+			.. "\t\tend\n"
+			.. "\t\tif BoneTree.ColliderFilter then\n"
+			.. "\t\t\tTreeColliders = {}\n"
+			.. "\t\t\tfor _, ColliderObject in self.ColliderObjects do\n"
+			.. "\t\t\t\tif BoneTree.ColliderFilter[ColliderObject.m_Object.Name] then\n"
+			.. "\t\t\t\t\ttable.insert(TreeColliders, ColliderObject)\n"
+			.. "\t\t\t\tend\n"
+			.. "\t\t\tend\n"
+			.. "\t\tend\n"
+			.. "\t\tBoneTree:Constrain(TreeColliders, UpdateHz)",
+	},
+	{
 		path = { "Components", "Bone" },
 		find = "self.LocalTransformOffset = Root.Bone.CFrame * self.LocalTransform",
 		replace = SB_MARK .. ": the spring's rest target hangs off the root's rest pose, not the CFrame SmartBone wrote\n"
@@ -1032,9 +1924,10 @@ local SB_PATCHES = {
 	},
 }
 
--- Returns "patched", "already" or nil plus what is missing
+-- Applies the patches that are not in yet (a copy patched by an older version of this plugin gets the new
+-- ones). Returns "patched", "already" or nil plus what is missing; nothing is written unless all apply.
 local function patchSmartBone(module)
-	local edits = {}
+	local edits, applied = {}, 0
 	for _, p in ipairs(SB_PATCHES) do
 		local script = module
 		for _, name in ipairs(p.path) do
@@ -1043,39 +1936,32 @@ local function patchSmartBone(module)
 		if not (script and script:IsA("LuaSourceContainer")) then
 			return nil, "no " .. table.concat(p.path, ".") .. " module"
 		end
-		edits[script] = edits[script] or script.Source
-	end
-	local already = true
-	for _, src in pairs(edits) do
-		if not string.find(src, SB_MARK, 1, true) then
-			already = false
+		local src = edits[script] or script.Source
+		local new = p.replace or (p.find .. p.add)
+		if not string.find(src, new, 1, true) then
+			local a, b = string.find(src, p.find, 1, true)
+			if not a or string.find(src, p.find, b + 1, true) then
+				return nil, "unknown SmartBone version (the line to patch in " .. script.Name .. " was not found once)"
+			end
+			src = string.sub(src, 1, a - 1) .. new .. string.sub(src, b + 1)
+			applied += 1
 		end
+		edits[script] = src
 	end
-	if already then
+	if applied == 0 then
 		return "already"
 	end
-	for _, p in ipairs(SB_PATCHES) do
-		local script = module
-		for _, name in ipairs(p.path) do
-			script = script:FindFirstChild(name)
-		end
-		local src = edits[script]
-		local a, b = string.find(src, p.find, 1, true)
-		if not a or string.find(src, p.find, b + 1, true) then
-			return nil, "unknown SmartBone version (the line to patch in " .. script.Name .. " was not found once)"
-		end
-		local new = p.replace or (p.find .. p.add)
-		edits[script] = string.sub(src, 1, a - 1) .. new .. string.sub(src, b + 1)
-	end
 	for script, src in pairs(edits) do
-		script.Source = src
+		if script.Source ~= src then
+			script.Source = src
+		end
 	end
 	return "patched"
 end
 
 -- A rig the importer made: a RootPart part with Bones under it
 local function isRig(model)
-	local rp = model:IsA("Model") and (model.PrimaryPart or model:FindFirstChild("RootPart"))
+	local rp = model:IsA("Model") and rootOf(model)
 	return rp and rp:IsA("BasePart") and rp:FindFirstChildWhichIsA("Bone", true) ~= nil
 end
 
@@ -1196,19 +2082,25 @@ local function integrateSmartBone()
 	end
 
 	local sps = game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts")
-	local runtime = sps:FindFirstChild(SMARTBONE_SCRIPT)
-	if runtime and not runtime:IsA("LocalScript") then
-		runtime:Destroy()
-		runtime = nil
-	end
-	local created = runtime == nil
-	runtime = runtime or Instance.new("LocalScript")
-	runtime.Name = SMARTBONE_SCRIPT
-	runtime.Source = (string.gsub(SMARTBONE_RUNTIME, "%-%-%[%[SMARTBONE_PATH%]%]", function()
+	-- replaced rather than edited: a new Source written into an existing script did not always reach playtests
+	-- (with collaborative editing, Studio can keep running the script's earlier version)
+	local source = (string.gsub(SMARTBONE_RUNTIME, "%-%-%[%[SMARTBONE_PATH%]%]", function()
 		return requirePath(module)
 	end))
-	runtime.Parent = sps
-	table.insert(lines, (created and "Added" or "Updated") .. " StarterPlayerScripts." .. SMARTBONE_SCRIPT .. ".")
+	local old = sps:FindFirstChild(SMARTBONE_SCRIPT)
+	if old and old:IsA("LocalScript") and old.Source == source then
+		table.insert(lines, "StarterPlayerScripts." .. SMARTBONE_SCRIPT .. " already there and up to date.")
+	else
+		local created = old == nil
+		if old then
+			old:Destroy()
+		end
+		local runtime = Instance.new("LocalScript")
+		runtime.Name = SMARTBONE_SCRIPT
+		runtime.Source = source
+		runtime.Parent = sps
+		table.insert(lines, (created and "Added" or "Updated") .. " StarterPlayerScripts." .. SMARTBONE_SCRIPT .. ".")
+	end
 
 	-- the selected rigs, or else every Uma rig in the place (a selected SmartBone library is not a rig)
 	local models = {}
@@ -1288,6 +2180,9 @@ local function setupWhenImported(model)
 			if cfg.autoTransparency then
 				table.insert(done, fixTransparency(model) .. " cheek/mayu part(s) fixed")
 			end
+			if cfg.toonLight then
+				table.insert(done, applyToonLight(model) .. " part(s) toon light")
+			end
 			if cfg.tagUmaChibi and tagUmaChibi(model) then
 				table.insert(done, "tagged " .. UMA_TAG)
 			end
@@ -1299,6 +2194,16 @@ local function setupWhenImported(model)
 					table.insert(done, string.format("%d animation(s) -> ServerStorage.RBX_ANIMSAVES.%s", n, holder and holder.Name or "?"))
 				else
 					warn("[Uma2Roblox] " .. model.Name .. ": animations not imported (is the Uma2Roblox app running?) " .. tostring(n))
+				end
+			end)
+		end
+		if cfg.importPhysics then
+			record("Uma2Roblox: import physics", function()
+				local bones, cols = importPhysics(model)
+				if bones then
+					table.insert(done, string.format("game physics on %d bone(s), %d collider(s)", bones, cols))
+				else
+					warn("[Uma2Roblox] " .. model.Name .. ": swing-bone physics not imported, SmartBone uses defaults (" .. tostring(cols) .. ")")
 				end
 			end)
 		end
@@ -1383,6 +2288,19 @@ local function button(text, onClick)
 	return b
 end
 
+-- the main actions: Studio's accent (dialog main button) colour, taller, bold
+local function primary(b)
+	b.Size = UDim2.new(1, 0, 0, 34)
+	b.BackgroundColor3 = theme:GetColor(Enum.StudioStyleGuideColor.DialogMainButton)
+	b.TextColor3 = theme:GetColor(Enum.StudioStyleGuideColor.DialogMainButtonText)
+	b.Font = Enum.Font.SourceSansBold
+	b.TextSize = 16
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 4)
+	c.Parent = b
+	return b
+end
+
 local function numberRow(text, value, onChange)
 	local row = Instance.new("Frame")
 	row.Size = UDim2.new(1, 0, 0, 24)
@@ -1422,10 +2340,6 @@ local function toggleRow(text, value, onChange)
 end
 
 label("1. Import Uma_*.glb with File > Import 3D\n2. Select the model(s), then Apply Uma Toon")
-numberRow("Target height (studs, 0 = keep)", cfg.targetHeight, function(n)
-	cfg.targetHeight = n
-	saveSettings()
-end)
 toggleRow("Fit RootPart to the body on import", cfg.fitOnImport, function(v)
 	cfg.fitOnImport = v
 	saveSettings()
@@ -1442,8 +2356,25 @@ toggleRow("Import its mini animations (on import and Apply)", cfg.autoAnimations
 	cfg.autoAnimations = v
 	saveSettings()
 end)
+toggleRow("Make the rig playable when importing animations (Humanoid, HumanoidRootPart, idle/emote tracks)",
+	cfg.playableRig, function(v)
+		cfg.playableRig = v
+		saveSettings()
+	end)
 toggleRow("Smooth out blinks (sprite #3 between open and closed eyes)", cfg.smoothBlinks, function(v)
 	cfg.smoothBlinks = v
+	saveSettings()
+end)
+toggleRow("Toon light: even, not washed out (on import and Apply)", cfg.toonLight, function(v)
+	cfg.toonLight = v
+	saveSettings()
+end)
+numberRow("Toon light tint (lower = darker in sun)", cfg.toonTint, function(n)
+	cfg.toonTint = math.clamp(n, 0, 1)
+	saveSettings()
+end)
+numberRow("Toon light emissive (higher = lighter shade, softer shadows)", cfg.toonEmissive, function(n)
+	cfg.toonEmissive = math.max(0, n)
 	saveSettings()
 end)
 toggleRow("Fix cheek/mayu transparency (on import and Apply)", cfg.autoTransparency, function(v)
@@ -1489,6 +2420,21 @@ button("Apply Uma Toon to selection", function()
 			total
 		)
 	end
+	if cfg.importPhysics then
+		local withPhysics, missing = 0, {}
+		record("Uma2Roblox: import physics", function()
+			for _, m in ipairs(models) do
+				local bones, err = importPhysics(m)
+				if bones then
+					withPhysics += 1
+				else
+					table.insert(missing, m.Name .. ": " .. tostring(err))
+				end
+			end
+		end)
+		status.Text ..= string.format("\nGame swing-bone physics on %d model(s).", withPhysics)
+			.. (#missing > 0 and ("\nNo physics (SmartBone defaults): " .. table.concat(missing, "; ")) or "")
+	end
 end)
 
 button("Fix cheek/mayu transparency (selection or whole place)", function()
@@ -1505,7 +2451,7 @@ button("Fix cheek/mayu transparency (selection or whole place)", function()
 	status.Text = string.format("Set Transparency = %.2f on %d part(s) matching '%s'.", TRANSPARENT_PASS, n, cfg.transparentParts)
 end)
 
-button("Import Uma animations for selection", function()
+primary(button("Import Uma animations for selection", function()
 	local models = selectedModels()
 	if #models == 0 then
 		status.Text = "Select an imported Uma model first."
@@ -1526,7 +2472,127 @@ button("Import Uma animations for selection", function()
 	end)
 	status.Text = string.format("%d animation(s) saved to ServerStorage.RBX_ANIMSAVES.", total)
 		.. (#errs > 0 and ("\n" .. table.concat(errs, "\n")) or "")
-end)
+end))
+
+-- Uploading creates assets under the place's owner, so it asks first, right under the button: what would be
+-- uploaded and to whom, with Upload / Cancel. Changing the selection cancels the question.
+local confirmBox, confirmText, confirmYes, confirmNo
+local pendingUpload = nil -- { models, total, ownerText }
+local function hideConfirm()
+	pendingUpload = nil
+	if confirmBox then
+		confirmBox.Visible = false
+	end
+end
+
+local function runUpload(p)
+	local done, errs = 0, {}
+	for _, m in ipairs(p.models) do -- uploadRigAnimations records its own undo step for the ids
+		local okUp, n, failed = pcall(uploadRigAnimations, m, function(msg)
+			status.Text = msg
+		end)
+		if okUp then
+			done += n
+			for _, f in ipairs(failed) do
+				table.insert(errs, m.Name .. ": " .. f)
+			end
+		else
+			table.insert(errs, m.Name .. ": " .. tostring(n))
+		end
+	end
+	status.Text = string.format("Uploaded %d of %d animation(s) (owner: %s); their ids are in %s.", done, p.total,
+		p.ownerText, ANIMATE_FOLDER) .. (#errs > 0 and ("\n" .. table.concat(errs, "\n")) or "")
+	if #errs > 0 then
+		warn("[Uma2Roblox] upload problems:\n" .. table.concat(errs, "\n"))
+	end
+end
+
+primary(button("Upload rig animations (selection; asks first)", function()
+	local models, total = {}, 0
+	for _, m in ipairs(selectedModels()) do
+		local n = #pendingUploads(m)
+		if n > 0 then
+			table.insert(models, m)
+			total += n
+		end
+	end
+	if total == 0 then
+		hideConfirm()
+		status.Text = "Nothing to upload: select a rig whose " .. ANIMATE_FOLDER .. " folder has Animations without an "
+			.. "AnimationId (import its animations first)."
+		return
+	end
+	local _, _, ownerText = placeOwner()
+	pendingUpload = { models = models, total = total, ownerText = ownerText }
+	confirmText.Text = string.format("Upload %d animation(s) from %d rig(s) as assets owned by %s?", total, #models,
+		ownerText)
+	confirmBox.Visible = true
+end))
+
+-- the confirmation row, directly under the upload button
+confirmBox = Instance.new("Frame")
+confirmBox.Size = UDim2.new(1, 0, 0, 0)
+confirmBox.AutomaticSize = Enum.AutomaticSize.Y
+confirmBox.BackgroundColor3 = theme:GetColor(Enum.StudioStyleGuideColor.InputFieldBackground)
+confirmBox.BorderSizePixel = 0
+confirmBox.Visible = false
+confirmBox.LayoutOrder = nextOrder()
+confirmBox.Parent = frame
+do
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 4)
+	c.Parent = confirmBox
+	local p = Instance.new("UIPadding")
+	p.PaddingLeft, p.PaddingRight, p.PaddingTop, p.PaddingBottom = UDim.new(0, 6), UDim.new(0, 6), UDim.new(0, 6), UDim.new(0, 6)
+	p.Parent = confirmBox
+	local l = Instance.new("UIListLayout")
+	l.Padding = UDim.new(0, 6)
+	l.SortOrder = Enum.SortOrder.LayoutOrder
+	l.Parent = confirmBox
+end
+confirmText = Instance.new("TextLabel")
+confirmText.Size = UDim2.new(1, 0, 0, 0)
+confirmText.AutomaticSize = Enum.AutomaticSize.Y
+confirmText.BackgroundTransparency = 1
+confirmText.TextWrapped = true
+confirmText.TextXAlignment = Enum.TextXAlignment.Left
+confirmText.Font = Enum.Font.SourceSansSemibold
+confirmText.TextSize = 15
+confirmText.TextColor3 = theme:GetColor(Enum.StudioStyleGuideColor.MainText)
+confirmText.LayoutOrder = 1
+confirmText.Parent = confirmBox
+do
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, 0, 0, 28)
+	row.BackgroundTransparency = 1
+	row.LayoutOrder = 2
+	row.Parent = confirmBox
+	local function rowButton(text, x, main, onClick)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(0.5, -3, 1, 0)
+		b.Position = UDim2.new(x, x > 0 and 3 or 0, 0, 0)
+		b.BackgroundColor3 = theme:GetColor(main and Enum.StudioStyleGuideColor.DialogMainButton or Enum.StudioStyleGuideColor.Button)
+		b.TextColor3 = theme:GetColor(main and Enum.StudioStyleGuideColor.DialogMainButtonText or Enum.StudioStyleGuideColor.ButtonText)
+		b.Font = Enum.Font.SourceSansBold
+		b.TextSize = 15
+		b.Text = text
+		b.Parent = row
+		b.MouseButton1Click:Connect(onClick)
+		return b
+	end
+	confirmYes = rowButton("Upload", 0, true, function()
+		local p = pendingUpload
+		hideConfirm()
+		if p then
+			runUpload(p)
+		end
+	end)
+	confirmNo = rowButton("Cancel", 0.5, false, function()
+		hideConfirm()
+		status.Text = "Upload cancelled."
+	end)
+end
+Selection.SelectionChanged:Connect(hideConfirm)
 
 button("Sync with Uma2Roblox app", function()
 	local list = scanPlace()
@@ -1570,6 +2636,10 @@ toggleRow("Tag rigs '" .. UMA_TAG .. "' on import and Apply", cfg.tagUmaChibi, f
 	cfg.tagUmaChibi = v
 	saveSettings()
 end)
+toggleRow("Import the game's swing-bone physics (on import and Apply)", cfg.importPhysics, function(v)
+	cfg.importPhysics = v
+	saveSettings()
+end)
 button("Integrate SmartBone 2 into this place", function()
 	local msg, err
 	record("Uma2Roblox: integrate SmartBone 2", function()
@@ -1578,12 +2648,532 @@ button("Integrate SmartBone 2 into this place", function()
 	status.Text = msg or err or "SmartBone 2 integration failed (see Output)."
 end)
 
+label("Face lock: StarterPlayerScripts." .. FACE_SCRIPT .. " keeps face sprites (eyes, mouth, mayu) from turning while animations blend. Rigs with face bones get the '" .. FACE_TAG .. "' tag; selected rigs, else all Uma rigs.")
+toggleRow("Include " .. FACE_SCRIPT .. " in StarterPlayerScripts when importing animations", cfg.includeFaceLock, function(v)
+	cfg.includeFaceLock = v
+	saveSettings()
+end)
+button("Add " .. FACE_SCRIPT .. " to this place", function()
+	local result, tagged, models = nil, 0, {}
+	record("Uma2Roblox: add face lock", function()
+		result = installFaceLockScript()
+		for _, m in ipairs(selectedModels()) do
+			if m ~= workspace and isRig(m) then
+				table.insert(models, m)
+			end
+		end
+		if #models == 0 then
+			for _, root in ipairs({ workspace, game:GetService("ReplicatedStorage"), game:GetService("ServerStorage") }) do
+				for _, d in ipairs(root:GetDescendants()) do
+					if d:IsA("Model") and isUmaModel(d) and not (d.Parent and d.Parent:IsA("Model") and isUmaModel(d.Parent)) then
+						table.insert(models, d)
+					end
+				end
+			end
+		end
+		for _, m in ipairs(models) do
+			if tagFaceLock(m) then
+				tagged += 1
+			end
+		end
+	end)
+	status.Text = string.format("StarterPlayerScripts.%s %s. %d of %d rig(s) with face bones tagged '%s'.", FACE_SCRIPT,
+		result == "current" and "was already up to date" or result, tagged, #models, FACE_TAG)
+end)
+
 button("Place: remove PBR reflections (optional)", function()
 	record("Uma2Roblox: lighting", function()
 		Lighting.EnvironmentSpecularScale = 0
 	end)
 	status.Text = "Lighting.EnvironmentSpecularScale = 0 (affects the whole place; undo with Ctrl+Z)."
 end)
+
+---------------------------------------------------------------- Face editor
+-- One face for a whole clip. Each face part (Face_Mayu_L/R, Face_Eye_L/R, Face_Mouth) is a set of sprite bones:
+-- its default sprite rests on the face (bone _00; the mouth's is _01, its small smile, as the app's FACE_DEFAULT),
+-- any other sprite #n turns bone _<n-1> in and the default bone out, with 180-degree Constant keys (see
+-- buildSequence). Apply removes every key of those bones from the clip and keys the
+-- chosen sprites once at its first and once at its last keyframe, so the face holds from start to end.
+-- The clip is the last one selected: a KeyframeSequence (ServerStorage.RBX_ANIMSAVES) or a rig's UmaAnimate
+-- Animation (its UmaClip attribute). The sliders preview on the clip's rig through the face bones' Transform.
+do -- (its own scope: the main chunk is near Luau's limit of 200 locals)
+local FACE_PARTS = {
+	{ group = "Mayu_L", name = "Mayu", side = "Mayu L" },
+	{ group = "Mayu_R", name = "Mayu R", side = "Mayu R", follows = "Mayu_L" },
+	{ group = "Eye_L", name = "Eye", side = "Eye L" },
+	{ group = "Eye_R", name = "Eye R", side = "Eye R", follows = "Eye_L" },
+	{ group = "Mouth", name = "Mouth", side = "Mouth" },
+}
+local FACE_TURN = math.pi - TURN_MARGIN
+local FACE_DEFAULT = { Mouth = 1 } -- the sprite each part shows at rest (0 when not listed), as the app builds it
+
+local function defaultOf(t, group)
+	return math.min(FACE_DEFAULT[group] or 0, (t.count[group] or 1) - 1)
+end
+
+-- whether sprite bone n of a part is turned while sprite `shown` is on: the default turns out, the shown one in
+local function turnedFor(n, shown, default)
+	if n == default then
+		return shown ~= default
+	end
+	return n == shown
+end
+
+local function faceGroupOf(name) -- "Face_Eye_L_08" -> "Eye_L", 8
+	local g, n = string.match(name, "^Face_(.+)_(%d+)$")
+	return g, n and tonumber(n)
+end
+
+-- the clip behind a selected instance, or nil
+local function clipOf(inst)
+	if inst:IsA("KeyframeSequence") then
+		return inst
+	end
+	local clip = inst:IsA("Animation") and inst:GetAttribute("UmaClip")
+	if not clip then
+		return nil
+	end
+	local m = inst:FindFirstAncestorWhichIsA("Model")
+	while m do -- the rig: the model whose AnimSaves link names its save folder
+		local link = m:FindFirstChild("AnimSaves")
+		local holder = link and link:IsA("ObjectValue") and link.Value
+		local ks = holder and holder:FindFirstChild(clip)
+		if ks and ks:IsA("KeyframeSequence") then
+			return ks
+		end
+		m = m.Parent and m.Parent:FindFirstAncestorWhichIsA("Model")
+	end
+	local saves = game:GetService("ServerStorage"):FindFirstChild("RBX_ANIMSAVES")
+	for _, holder in ipairs(saves and saves:GetChildren() or {}) do
+		local ks = holder:FindFirstChild(clip)
+		if ks and ks:IsA("KeyframeSequence") then
+			return ks
+		end
+	end
+	return nil
+end
+
+local function sortedKeyframes(ks)
+	local kfs = ks:GetKeyframes()
+	table.sort(kfs, function(a, b)
+		return a.Time < b.Time
+	end)
+	return kfs
+end
+
+-- What the clip's face is made of: bones[group][index] = bone name, the turn axis of each bone, the face at its
+-- start (values[group] = 0-based sprite index), and its rig (for the preview) if that is still in the place.
+local function readFace(ks)
+	local holder = ks.Parent
+	local rig = holder and holder:IsA("ObjectValue") and holder.Value
+	if not (rig and rig:IsDescendantOf(game)) then
+		rig = nil
+	end
+	local t = { ks = ks, rig = rig, bones = {}, count = {}, axes = {}, values = {}, rigBones = {} }
+	local function addBone(name)
+		local g, n = faceGroupOf(name)
+		if g then
+			t.bones[g] = t.bones[g] or {}
+			t.bones[g][n] = name
+			t.count[g] = math.max(t.count[g] or 0, n + 1)
+		end
+		return g
+	end
+	if rig then
+		for _, d in ipairs(rig:GetDescendants()) do
+			if d:IsA("Bone") and addBone(d.Name) then
+				t.rigBones[d.Name] = d
+			end
+		end
+	end
+	local kfs = sortedKeyframes(ks)
+	local turnedAtStart = {}
+	for i, kf in ipairs(kfs) do
+		for _, p in ipairs(kf:GetDescendants()) do
+			if p:IsA("Pose") and addBone(p.Name) then
+				t.head = t.head or p.Parent.Name
+				local axis, angle = p.CFrame:ToAxisAngle()
+				if angle > math.pi / 2 then
+					t.axes[p.Name] = t.axes[p.Name] or axis
+					if i == 1 then
+						turnedAtStart[p.Name] = true
+					end
+				end
+			end
+		end
+	end
+	-- the start face: the sprite turned in, else the default resting on the face
+	for g, bones in pairs(t.bones) do
+		local default = defaultOf(t, g)
+		t.values[g] = default
+		for n, name in pairs(bones) do
+			if n ~= default and turnedAtStart[name] then
+				t.values[g] = n
+			end
+		end
+	end
+	return t
+end
+
+local function faceDescription(t, values)
+	local parts = {}
+	for _, part in ipairs(FACE_PARTS) do
+		if t.count[part.group] then
+			table.insert(parts, string.format("%s #%d", part.side, values[part.group] + 1))
+		end
+	end
+	return table.concat(parts, ", ")
+end
+
+-- Keys the face on the clip. Returns a summary, or nil and why not.
+local function applyFace(t, values)
+	local ks = t.ks
+	local kfs = sortedKeyframes(ks)
+	local headName = t.head or "Head"
+	local function headPose(kf)
+		for _, p in ipairs(kf:GetDescendants()) do
+			if p:IsA("Pose") and p.Name == headName then
+				return p
+			end
+		end
+	end
+	local first, last
+	for _, kf in ipairs(kfs) do
+		local h = headPose(kf)
+		if h then
+			first = first or h
+			last = h
+		end
+	end
+	if not first then
+		return nil, ks.Name .. " has no '" .. headName .. "' key to hang the face keys on."
+	end
+	local removed = 0
+	for _, kf in ipairs(kfs) do
+		for _, p in ipairs(kf:GetDescendants()) do
+			if p:IsA("Pose") and t.bones[(faceGroupOf(p.Name))] then
+				p:Destroy()
+				removed += 1
+			end
+		end
+	end
+	for _, head in ipairs(first == last and { first } or { first, last }) do
+		for g, bones in pairs(t.bones) do
+			local default = defaultOf(t, g)
+			local shown = values[g] or default
+			for n, name in pairs(bones) do
+				local on = turnedFor(n, shown, default)
+				local pose = Instance.new("Pose")
+				pose.Name = name
+				pose.CFrame = on and CFrame.fromAxisAngle(t.axes[name] or Vector3.yAxis, FACE_TURN) or CFrame.identity
+				pose.EasingStyle = Enum.PoseEasingStyle.Constant
+				pose.Parent = head
+			end
+		end
+	end
+	-- The clip changed: a new fingerprint, and the rig's tracks of it lose their upload so "Upload rig animations"
+	-- sends the new face (the same as importing a changed clip again).
+	local desc = faceDescription(t, values)
+	ks:SetAttribute("UmaClipHash", fingerprint((ks:GetAttribute("UmaClipHash") or "") .. "|face|" .. desc))
+	ks:SetAttribute("UmaFace", desc)
+	local cleared = 0
+	local folder = t.rig and t.rig:FindFirstChild(ANIMATE_FOLDER)
+	for _, a in ipairs(folder and folder:GetDescendants() or {}) do
+		if a:IsA("Animation") and a:GetAttribute("UmaClip") == ks.Name and a.AnimationId ~= "" then
+			a.AnimationId = ""
+			a:SetAttribute("UmaClipHash", nil)
+			a:SetAttribute("UmaUploadedTo", nil)
+			cleared += 1
+		end
+	end
+	return string.format("%s: face set to %s for the whole clip (%d old face key(s) replaced).%s", ks.Name, desc,
+		removed, cleared > 0 and string.format(
+			"\n%d track(s) of this clip in %s.%s now need uploading: click 'Upload rig animations'. Animations elsewhere that use its old asset id need the new id afterwards.",
+			cleared, t.rig.Name, ANIMATE_FOLDER) or "")
+end
+
+local faceWidget = plugin:CreateDockWidgetPluginGui(
+	"Uma2RobloxFace",
+	DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, false, false, 320, 300, 260, 220)
+)
+faceWidget.Title = "Uma Face"
+local faceButton = toolbar:CreateButton("Uma Face", "Set one face (mayu, eyes, mouth) for a whole clip",
+	"rbxassetid://4458901886")
+faceButton.ClickableWhenViewportHidden = true
+faceButton.Click:Connect(function()
+	faceWidget.Enabled = not faceWidget.Enabled
+end)
+faceWidget:GetPropertyChangedSignal("Enabled"):Connect(function()
+	faceButton:SetActive(faceWidget.Enabled)
+end)
+button("Open face editor (one face for a whole clip)", function()
+	faceWidget.Enabled = true
+end)
+
+local faceFrame = Instance.new("ScrollingFrame")
+faceFrame.Size = UDim2.fromScale(1, 1)
+faceFrame.BackgroundColor3 = theme:GetColor(Enum.StudioStyleGuideColor.MainBackground)
+faceFrame.BorderSizePixel = 0
+faceFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+faceFrame.CanvasSize = UDim2.new()
+faceFrame.ScrollBarThickness = 6
+faceFrame.Parent = faceWidget
+do
+	local p = Instance.new("UIPadding")
+	p.PaddingLeft, p.PaddingRight, p.PaddingTop = UDim.new(0, 8), UDim.new(0, 8), UDim.new(0, 8)
+	p.Parent = faceFrame
+	local l = Instance.new("UIListLayout")
+	l.Padding = UDim.new(0, 6)
+	l.SortOrder = Enum.SortOrder.LayoutOrder
+	l.Parent = faceFrame
+end
+-- widgets made with the main panel's helpers, moved into this panel
+local function inFace(gui)
+	gui.Parent = faceFrame
+	return gui
+end
+
+local face = nil -- readFace() of the current clip
+local faceValues = {} -- group -> 0-based sprite index shown
+local faceLinked = true -- left and right share one slider
+local previewed = {} -- bones whose Transform the preview set
+local faceRows = {} -- group -> { row, name label, show(value, count) }
+
+local clipLabel = inFace(label("", nil))
+clipLabel.LayoutOrder = 1
+local linkButton -- LayoutOrder 2, made below; the slider rows are 3-7, then the buttons and status
+local faceStatus
+local function showLinked()
+	linkButton.Text = (faceLinked and "[x] " or "[ ] ") .. "Same sprite for left and right"
+end
+
+local function clearPreview()
+	for bone in pairs(previewed) do
+		if bone.Parent then
+			bone.Transform = CFrame.identity
+		end
+	end
+	previewed = {}
+end
+
+local function preview()
+	if not (face and face.rig and faceWidget.Enabled) then
+		clearPreview()
+		return
+	end
+	for g, bones in pairs(face.bones) do
+		local default = defaultOf(face, g)
+		local shown = faceValues[g] or default
+		for n, name in pairs(bones) do
+			local bone = face.rigBones[name]
+			if bone and bone.Parent then
+				local on = turnedFor(n, shown, default)
+				bone.Transform = on and CFrame.fromAxisAngle(face.axes[name] or Vector3.yAxis, FACE_TURN) or CFrame.identity
+				previewed[bone] = true
+			end
+		end
+	end
+end
+
+local function refreshRows()
+	for _, part in ipairs(FACE_PARTS) do
+		local r = faceRows[part.group]
+		local count = face and face.count[part.group]
+		r.row.Visible = count ~= nil and not (faceLinked and part.follows ~= nil)
+		r.name.Text = faceLinked and part.name or part.side
+		if count then
+			r.show(faceValues[part.group] or 0, count)
+		end
+	end
+end
+
+local function setValue(group, v)
+	local count = face and face.count[group]
+	if not count then
+		return
+	end
+	faceValues[group] = math.clamp(math.floor(v + 0.5), 0, count - 1)
+	if faceLinked then -- the left slider drives its right side too
+		for _, part in ipairs(FACE_PARTS) do
+			if part.follows == group and face.count[part.group] then
+				faceValues[part.group] = math.min(faceValues[group], face.count[part.group] - 1)
+			end
+		end
+	end
+	refreshRows()
+	preview()
+end
+
+for i, part in ipairs(FACE_PARTS) do
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, 0, 0, 24)
+	row.BackgroundTransparency = 1
+	row.LayoutOrder = 2 + i
+	row.Parent = faceFrame
+	local name = label(part.name, 24)
+	name.Parent = row
+	name.Size = UDim2.new(0, 56, 1, 0)
+	name.TextYAlignment = Enum.TextYAlignment.Center
+	local value = label("", 24)
+	value.Parent = row
+	value.Size = UDim2.new(0, 50, 1, 0)
+	value.Position = UDim2.fromOffset(56, 0)
+	value.TextYAlignment = Enum.TextYAlignment.Center
+	local function step(text, x, d)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(0, 22, 1, 0)
+		b.Position = x
+		b.BackgroundColor3 = theme:GetColor(Enum.StudioStyleGuideColor.Button)
+		b.TextColor3 = theme:GetColor(Enum.StudioStyleGuideColor.ButtonText)
+		b.Font = Enum.Font.SourceSansBold
+		b.TextSize = 16
+		b.Text = text
+		b.Parent = row
+		b.MouseButton1Click:Connect(function()
+			setValue(part.group, (faceValues[part.group] or 0) + d)
+		end)
+	end
+	step("<", UDim2.fromOffset(108, 0), -1)
+	step(">", UDim2.new(1, -22, 0, 0), 1)
+	-- the slider: click or drag along the track
+	local track = Instance.new("Frame")
+	track.Size = UDim2.new(1, -160, 0, 6)
+	track.Position = UDim2.new(0, 134, 0.5, -3)
+	track.BackgroundColor3 = theme:GetColor(Enum.StudioStyleGuideColor.InputFieldBackground)
+	track.BorderSizePixel = 0
+	track.Active = true
+	track.Parent = row
+	local hit = Instance.new("TextButton") -- a taller, invisible hit area over the thin track
+	hit.Size = UDim2.new(1, 0, 0, 24)
+	hit.Position = UDim2.new(0, 0, 0.5, -12)
+	hit.BackgroundTransparency = 1
+	hit.Text = ""
+	hit.Parent = track
+	local knob = Instance.new("Frame")
+	knob.Size = UDim2.fromOffset(10, 16)
+	knob.AnchorPoint = Vector2.new(0.5, 0.5)
+	knob.BackgroundColor3 = theme:GetColor(Enum.StudioStyleGuideColor.DialogMainButton)
+	knob.BorderSizePixel = 0
+	knob.Parent = track
+	local dragging = false
+	local function fromX(x)
+		local count = face and face.count[part.group]
+		if count and count > 1 then
+			local a = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+			setValue(part.group, a * (count - 1))
+		end
+	end
+	hit.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			fromX(input.Position.X)
+		end
+	end)
+	hit.InputChanged:Connect(function(input)
+		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+			fromX(input.Position.X)
+		end
+	end)
+	hit.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = false
+		end
+	end)
+	hit.MouseLeave:Connect(function()
+		dragging = false
+	end)
+	faceRows[part.group] = {
+		row = row,
+		name = name,
+		show = function(v, count)
+			value.Text = string.format("#%d / %d", v + 1, count)
+			knob.Position = UDim2.new(count > 1 and v / (count - 1) or 0, 0, 0.5, 0)
+		end,
+	}
+end
+
+local function setClip(ks)
+	clearPreview()
+	face = ks and readFace(ks) or nil
+	faceValues = face and table.clone(face.values) or {}
+	if face then
+		-- linked when the clip starts with the same sprite on both sides
+		faceLinked = (faceValues.Mayu_L == faceValues.Mayu_R) and (faceValues.Eye_L == faceValues.Eye_R)
+		showLinked()
+		clipLabel.Text = string.format("Clip: %s\n%s", ks:GetFullName(), face.rig
+			and ("Preview on: " .. face.rig:GetFullName())
+			or "No rig in the place for this clip's save folder: no preview.")
+		if next(face.bones) == nil then
+			clipLabel.Text ..= "\nThis clip and its rig have no Face_ sprite bones."
+		end
+	else
+		clipLabel.Text = "Select a clip: a KeyframeSequence in ServerStorage.RBX_ANIMSAVES, or an Animation in a rig's "
+			.. ANIMATE_FOLDER .. " folder. The last one selected stays here."
+	end
+	refreshRows()
+	preview()
+end
+
+linkButton = inFace(button("", function()
+	faceLinked = not faceLinked
+	showLinked()
+	if faceLinked then -- the right side takes the left side's sprite
+		for _, part in ipairs(FACE_PARTS) do
+			if part.follows then
+				setValue(part.follows, faceValues[part.follows] or 0)
+			end
+		end
+	end
+	refreshRows()
+	preview()
+end))
+linkButton.LayoutOrder = 2
+showLinked()
+
+inFace(button("Reset sliders to the clip's starting face", function()
+	if face and face.ks.Parent then
+		setClip(face.ks)
+	end
+end)).LayoutOrder = 8
+local applyButton = primary(inFace(button("Apply to whole clip", function()
+	if not (face and face.ks:IsDescendantOf(game)) then
+		faceStatus.Text = "Select a clip first."
+		return
+	end
+	if next(face.bones) == nil then
+		faceStatus.Text = face.ks.Name .. " has no face sprite bones."
+		return
+	end
+	local msg, err
+	record("Uma2Roblox: set clip face", function()
+		msg, err = applyFace(face, faceValues)
+	end)
+	faceStatus.Text = msg or err or "Applying the face failed (see Output)."
+end)))
+applyButton.LayoutOrder = 9
+faceStatus = inFace(label(""))
+faceStatus.LayoutOrder = 10
+
+Selection.SelectionChanged:Connect(function()
+	for _, inst in ipairs(Selection:Get()) do
+		local ks = clipOf(inst)
+		if ks then
+			if not (face and face.ks == ks) then
+				setClip(ks)
+			end
+			return
+		end
+	end
+end)
+faceWidget:GetPropertyChangedSignal("Enabled"):Connect(function()
+	if faceWidget.Enabled and face and not face.ks:IsDescendantOf(game) then
+		setClip(nil)
+	end
+	preview()
+end)
+plugin.Unloading:Connect(clearPreview)
+setClip(nil)
+end
 
 status = label("")
 
