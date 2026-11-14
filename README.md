@@ -135,6 +135,22 @@ Studio plugin, then start `Uma2Roblox.exe`. `Uma2Roblox-cli.exe` is the command-
 6. Click **Sync with Uma2Roblox app** (allow the localhost request the first time). Those characters
    are now marked *in Studio* and drop off the "not ported" list.
 
+### Hair, tail and skirt physics (SmartBone 2)
+The minis' swing bones (`Sp_*`: hair, tail, ribbons, skirt/jacket, bust) can move with
+SmartBone 2 at runtime. SmartBone isn't included here: insert your
+copy of the SmartBone 2 ModuleScript into the place (anywhere), then in the plugin click
+**Integrate SmartBone 2 into this place**. If it's somewhere unusual, select it in the Explorer first, or enter its
+asset id in the panel. The button:
+* moves SmartBone to ReplicatedStorage and patches it for the minis' bone axes (the patch only acts on rigs the
+  plugin sets up, other SmartBone objects behave as before; tested with SmartBone 2 v0.5.2),
+* adds `StarterPlayerScripts.UmaChibiSmartBone`, which gives every model tagged **`UmaChibi`** spring physics
+  when it appears in Workspace (ears stay on their animations),
+* tags the selected rigs `UmaChibi`, or every Uma rig in the place when none is selected. Imported and Applied
+  models get the tag automatically (option **Tag rigs 'UmaChibi' on import and Apply**).
+
+Tune the feel at the top of `UmaChibiSmartBone` (`SETTINGS`, `ROTATION_LIMIT`, `EXCLUDE`), or per rig with
+SmartBone attributes on its RootPart (`Stiffness`, `Damping`, `Gravity`, …); attributes already set win.
+
 Already have PMX files? Use **Convert PMX file…**, or from the command line:
 ```
 Uma2Roblox.exe convert "1001_Special Week.pmx"
