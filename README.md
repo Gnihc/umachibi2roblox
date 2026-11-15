@@ -150,6 +150,9 @@ Studio plugin, then start `Uma2Roblox.exe`. `Uma2Roblox-cli.exe` is the command-
 5. Select the imported model(s) → **Uma2Roblox** plugin → **Apply Uma Toon to selection**.
    It turns off shadows, faces the model forward, and tags it `UmaCharaId` / `UmaCostume`. The model
    keeps its imported size; use `Model:ScaleTo` to resize it (HipHeight scales with it).
+6. **Check it with a playtest (F5).** After porting several characters, Studio's edit view may not show a
+   model properly (missing or stretched parts, a wrong pose, an old look). That's only the edit view: press
+   **Play** and check the model in the playtest before changing or re-importing anything.
 
 ### Playable character (idle and emotes)
 With **Make the rig playable when importing animations** on (the default), importing a rig's animations
@@ -271,6 +274,8 @@ py -3 uma2roblox.py inspect "<game data>\dat\AB\ABCDEF…"   (raw files from the
   animations aren't ported, only body/bone motion.
 * For animations, export the PMX right after loading the mini without picking another animation, so the export
   pose can be recognised. If the app logs a large fit error, re-export.
+* After porting multiple characters, a model may not load properly in edit mode. Confirm it with a playtest:
+  what you see in Play is what players get.
 * Roblox can't turn off *receiving* shadows per part.
 * Uma Musume assets are © Cygames. Keep exports for personal use and check Roblox's terms before uploading.
 
