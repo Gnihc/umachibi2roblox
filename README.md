@@ -19,10 +19,10 @@ expressions:
 
 ### Porting example
 From UmaViewer to a playable character in about two minutes: export Special Week, import her in Studio, apply
-the plugin, upload her animations, add UmaAnimateHandler, then play and `/e Emote` (4× speed; click it for the
-full-length video):
+the plugin, upload her animations, add UmaAnimateHandler, then play and `/e Emote` (4× speed; click it to
+[watch the full video on YouTube](https://www.youtube.com/watch?v=aMTB7jGTNck)):
 
-[![Porting Special Week from UmaViewer to a playable Roblox character](docs/media/porting-example.gif)](docs/media/porting-example.mp4)
+[![Porting Special Week from UmaViewer to a playable Roblox character](docs/media/porting-example.gif)](https://www.youtube.com/watch?v=aMTB7jGTNck)
 
 Every ported clip lands in the **Animation Editor**, ready to preview, tweak and publish:
 
