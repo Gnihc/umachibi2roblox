@@ -1093,7 +1093,7 @@ local function installFaceLock(model)
 	end
 end
 
--- Playable character. Imported animations make the rig a character the Animate script can drive (it keeps its
+-- Playable character. Imported animations make the rig a character UmaAnimateHandler can drive (it keeps its
 -- name; copy it to StarterPlayer as StarterCharacter): the root part becomes HumanoidRootPart (before the
 -- KeyframeSequences are built, as their root Pose is named after it), the AnimationController goes, and a Humanoid
 -- with an Animator takes its place. R15, so the Humanoid holds the root at HipHeight (the lift fitRootToBody left
@@ -1139,7 +1139,7 @@ local function makePlayable(model)
 	return true
 end
 
--- The rig's own animations for the place's Animate script, in its format (a StringValue per animation set holding
+-- The rig's own animations for UmaAnimateHandler (and older Uma Animate scripts), in the Animate format (a StringValue per animation set holding
 -- Animation instances, each with an optional Weight NumberValue), in a "UmaAnimate" folder on the rig:
 --   idle    the costume's own idle if it has one (alt outfits), else the character's idle01 (its _loop clip)
 --   Emotes.Emote<n>  one per non-idle clip set of the character (res, mot, act, ..., from every outfit), in an
@@ -2838,6 +2838,904 @@ button("Add " .. FACE_SCRIPT .. " to this place", function()
 	status.Text = string.format("StarterPlayerScripts.%s %s. %d of %d rig(s) with face bones tagged '%s'.", FACE_SCRIPT,
 		result == "current" and "was already up to date" or result, tagged, #models, FACE_TAG)
 end)
+
+---------------------------------------------------------------- UmaAnimateHandler
+-- Replaces the place's Animate script for Uma rigs. ReplicatedStorage.UmaAnimateHandler (a ModuleScript) finds every
+-- Uma rig anywhere in Workspace (a Model with UmaCharaId or a UmaAnimate folder) and animates it on one side:
+--   a player's character  by that player's client (StarterPlayerScripts.UmaAnimateClient), so it replicates
+--   any other rig (NPC)   by the server (ServerScriptService.UmaAnimateServer)
+-- Its children:
+--   _idle, _walk (and optionally _run, _jump, _fall, _climb, _sit, _swim): the universal base animations, one or more
+--           Animations each (several = picked at random by a Weight NumberValue/attribute). A rig's own UmaAnimate
+--           set of the same name (its idle) wins when uploaded. These are the user's own uploads.
+--   any other Folder: an /e extension. /e Dance = a random entry of folder "Dance", /e Dance3 = its entry named
+--           "Dance3" or "3" (else the 3rd one). An entry is an Animation (looped) or a Folder/StringValue with
+--           "Start" (played once) and/or "Loop" (then held until the player moves).
+do -- (its own scope: the main chunk is near Luau's limit of 200 locals)
+local HANDLER_NAME = "UmaAnimateHandler"
+local HANDLER_SERVER = "UmaAnimateServer"
+local HANDLER_CLIENT = "UmaAnimateClient"
+local OLD_ANIMATE_BACKUP = "Animate (old, replaced by UmaAnimateHandler)"
+
+local HANDLER_SOURCE = [===[
+-- UmaAnimateHandler (Uma2Roblox): animates every Uma rig in Workspace, at any depth.
+--
+--   a player's character  animated by that player's client (StarterPlayerScripts.UmaAnimateClient)
+--   any other Uma rig     animated by the server (ServerScriptService.UmaAnimateServer): NPCs
+--
+-- A Uma rig is a Model with a UmaCharaId attribute or a UmaAnimate folder, and a Humanoid or AnimationController.
+-- Set the rig's UmaAnimateDisabled attribute to true to leave it alone. Its Animate script, if any, is disabled.
+--
+-- BASE ANIMATIONS: the folders starting with "_" in this module. Put your OWN uploaded Animations in them (an
+-- Animation with its AnimationId set; an empty AnimationId is skipped):
+--   _idle  standing        _walk  moving
+--   optional: _run (from RunSpeed studs/s, an attribute of this module, default 18), _jump, _fall, _climb, _sit, _swim
+-- Missing ones fall back: run -> walk -> idle, jump/fall/sit -> idle, climb/swim -> walk.
+-- Several Animations in one = picked at random by their Weight (NumberValue child or attribute, default 1).
+-- SpeedAt1x attribute (on the folder or the Animation): the speed in studs/s at which the clip plays at 1x; the
+-- clip then speeds up and slows down with the rig. A rig's own UmaAnimate.<name> set (its idle, from the
+-- Uma2Roblox plugin) wins over the universal one once it is uploaded.
+--
+-- /e EXTENSIONS: every other Folder in this module.
+--   /e Dance      a random entry of the folder "Dance"
+--   /e Dance3     its entry named "Dance3" or "3", else its 3rd entry
+--   /e Emote, /e Emote2   the rig's own emotes (UmaAnimate.Emotes, from the plugin)
+-- An entry is an Animation (looped until the player moves), or a Folder/StringValue holding "Start" (played once)
+-- and/or "Loop" (then looped). Anything not found goes to the default Animate / catalog emotes.
+--
+-- SCRIPTING:
+--   Handler.Play(rig, "Dance3")   plays an emote on a rig this side animates (server: NPCs; client: own character)
+--   Handler.Stop(rig)             back to idle
+--   rig:SetAttribute("UmaEmote", "Umapyoi2")   the same from anywhere (server: also for players' characters)
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local Handler = {}
+
+local RIG_FOLDER = "UmaAnimate"
+local RIG_EMOTES = "Emotes"
+local FALLBACK = { run = "walk", walk = "idle", jump = "idle", fall = "idle", sit = "idle", climb = "walk", swim = "walk" }
+local FADE = 0.1
+local FALL_FADE = 0.3
+local JUMP_TIME = 0.3
+
+local IS_SERVER = RunService:IsServer()
+local side = nil -- "server" / "client", once started
+local controllers = {} -- rig -> controller (or true while it starts)
+local waiting = {} -- rig -> connection, rigs without a Humanoid/AnimationController yet
+local warned = {}
+
+local function note(key, msg)
+	if not warned[key] then
+		warned[key] = true
+		warn("[UmaAnimateHandler] " .. msg)
+	end
+end
+
+local function playable(a)
+	return a ~= nil and a:IsA("Animation") and a.AnimationId ~= ""
+end
+
+-- children in natural order: Dance2 before Dance10
+local function sortedChildren(inst)
+	local list = inst:GetChildren()
+	table.sort(list, function(a, b)
+		local pa, na = string.match(string.lower(a.Name), "^(.-)(%d*)$")
+		local pb, nb = string.match(string.lower(b.Name), "^(.-)(%d*)$")
+		if pa ~= pb then
+			return pa < pb
+		end
+		return (tonumber(na) or -1) < (tonumber(nb) or -1)
+	end)
+	return list
+end
+
+local function weightOf(a)
+	local w = a:FindFirstChild("Weight")
+	if w and w:IsA("ValueBase") and tonumber(w.Value) then
+		return tonumber(w.Value)
+	end
+	return tonumber(a:GetAttribute("Weight")) or 1
+end
+
+-- the playable Animations of a set, with their weights
+local function animsIn(set)
+	local list, total = {}, 0
+	if set then
+		for _, a in ipairs(sortedChildren(set)) do
+			local w = playable(a) and weightOf(a) or 0
+			if w > 0 then
+				table.insert(list, { anim = a, weight = w })
+				total += w
+			end
+		end
+	end
+	return list, total
+end
+
+local function isExtension(f)
+	return f:IsA("Folder") and string.sub(f.Name, 1, 1) ~= "_"
+end
+
+---------------------------------------------------------------- emotes
+
+local function entryFrom(group, inst)
+	local e = { name = string.lower(inst.Name) }
+	e.key = "uma:" .. group .. ":" .. e.name
+	if playable(inst) then
+		e.loop = inst
+		return e
+	end
+	local start, loop = inst:FindFirstChild("Start"), inst:FindFirstChild("Loop")
+	e.start = playable(start) and start or nil
+	e.loop = playable(loop) and loop or nil
+	if not (e.start or e.loop) then -- a set with one Animation of any name
+		for _, a in ipairs(sortedChildren(inst)) do
+			if playable(a) then
+				e.loop = a
+				break
+			end
+		end
+	end
+	return (e.start or e.loop) and e or nil
+end
+
+-- lname: the /e name, lower case; prefix: the container's name, lower case
+local function findIn(container, prefix, lname, pattern)
+	local list = {}
+	for _, inst in ipairs(sortedChildren(container)) do
+		if not pattern or string.match(inst.Name, pattern) then
+			local e = entryFrom(prefix, inst)
+			if e then
+				table.insert(list, e)
+			end
+		end
+	end
+	if #list == 0 then
+		return nil
+	elseif lname == prefix then
+		return list[math.random(1, #list)]
+	end
+	local rest = string.sub(lname, 1, #prefix) == prefix and string.sub(lname, #prefix + 1) or nil
+	for _, e in ipairs(list) do
+		if e.name == lname or e.name == rest then
+			return e
+		end
+	end
+	local n = rest and tonumber(rest)
+	return n and list[n] or nil
+end
+
+local function findEmote(rig, name)
+	local lname = string.lower(name)
+	-- the rig's own emotes: /e Emote, /e Emote3
+	local folder = rig:FindFirstChild(RIG_FOLDER)
+	if folder then
+		local emotes = folder:FindFirstChild(RIG_EMOTES)
+		local e = emotes and findIn(emotes, "emote", lname) or (not emotes and findIn(folder, "emote", lname, "^[Ee]mote%d+$"))
+		if e then
+			return e
+		end
+	end
+	-- the extension folders: the longest folder name the command starts with
+	local best
+	for _, f in ipairs(script:GetChildren()) do
+		local fname = string.lower(f.Name)
+		if isExtension(f) and string.sub(lname, 1, #fname) == fname and (not best or #fname > #best.Name) then
+			best = f
+		end
+	end
+	local e = best and findIn(best, string.lower(best.Name), lname)
+	if e then
+		return e
+	end
+	-- an entry of any extension folder by its own name
+	for _, f in ipairs(script:GetChildren()) do
+		if isExtension(f) then
+			local c = f:FindFirstChild(name)
+			e = c and entryFrom(string.lower(f.Name), c)
+			if e then
+				return e
+			end
+			for _, c2 in ipairs(f:GetChildren()) do
+				if string.lower(c2.Name) == lname then
+					e = entryFrom(string.lower(f.Name), c2)
+					if e then
+						return e
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+---------------------------------------------------------------- one rig
+
+local Controller = {}
+Controller.__index = Controller
+
+local function animatorOf(rig)
+	local hum = rig:FindFirstChildOfClass("Humanoid")
+	local holder = hum or rig:FindFirstChildOfClass("AnimationController")
+	if not holder then
+		return nil
+	end
+	local animator = holder:FindFirstChildOfClass("Animator")
+	if not animator then
+		if IS_SERVER then
+			animator = Instance.new("Animator")
+			animator.Parent = holder
+		else
+			animator = holder:WaitForChild("Animator", 5) -- made by the server; one made here would not replicate
+		end
+	end
+	return animator, hum
+end
+
+-- the rig's own set, else the universal one, else the fallbacks: resolved name, animations, total weight, set
+function Controller:resolve(name)
+	local seen = {}
+	while name and not seen[name] do
+		seen[name] = true
+		local own = self.rig:FindFirstChild(RIG_FOLDER)
+		local sets = { (own and own:FindFirstChild(name)) or false, script:FindFirstChild("_" .. name) or false }
+		for i = 1, 2 do
+			local list, total = animsIn(sets[i] or nil)
+			if total > 0 then
+				return name, list, total, sets[i]
+			end
+		end
+		name = FALLBACK[name]
+	end
+	return nil
+end
+
+function Controller:stopCurrent(fade)
+	fade = fade or FADE
+	self.token = nil
+	self.emoting = false
+	if self.trackConn then
+		self.trackConn:Disconnect()
+		self.trackConn = nil
+	end
+	local track = self.track
+	if track then
+		track:Stop(fade)
+		task.delay(fade + 0.1, function()
+			track:Destroy()
+		end)
+	end
+	self.track, self.anim, self.current = nil, nil, nil
+end
+
+function Controller:load(anim, looped, fade)
+	local track = self.animator:LoadAnimation(anim)
+	self.owned[track] = true
+	track.Priority = Enum.AnimationPriority.Core
+	track.Looped = looped
+	track:Play(fade)
+	self.track, self.anim = track, anim
+	return track
+end
+
+-- plays a base set (idle, walk, ...); nothing changes when one of its animations is already playing
+function Controller:play(name, fade, reroll)
+	local resolved, list, total, set = self:resolve(name)
+	if not resolved then
+		if self.track and not self.emoting then
+			self:stopCurrent(fade)
+		end
+		return
+	end
+	if self.track and not reroll then
+		for _, e in ipairs(list) do
+			if e.anim == self.anim then
+				self.current = name
+				return
+			end
+		end
+	end
+	local roll, pick = math.random() * total, list[#list].anim
+	for _, e in ipairs(list) do
+		roll -= e.weight
+		if roll <= 0 then
+			pick = e.anim
+			break
+		end
+	end
+	if reroll and pick == self.anim and self.track then
+		return
+	end
+	self:stopCurrent(fade)
+	local track = self:load(pick, resolved ~= "jump", fade)
+	self.current = name
+	self.speedAt1x = tonumber(pick:GetAttribute("SpeedAt1x")) or tonumber(set:GetAttribute("SpeedAt1x"))
+	if #list > 1 and resolved == "idle" then -- several idles: a new pick every cycle
+		self.trackConn = track.DidLoop:Connect(function()
+			if self.track == track then
+				self:play(name, FADE, true)
+			end
+		end)
+	end
+end
+
+function Controller:fitSpeed(speed)
+	if self.track and self.speedAt1x and self.speedAt1x > 0 and not self.emoting then
+		self.track:AdjustSpeed(speed / self.speedAt1x)
+	end
+end
+
+function Controller:emote(name)
+	if self.pose == "Dead" or (self.humanoid and self.pose ~= "Standing") then
+		return false
+	end
+	local e = findEmote(self.rig, name)
+	if not e then
+		return false
+	end
+	self:stopCurrent(FADE)
+	self.emoting, self.current = true, e.key
+	local token = {}
+	self.token = token
+	if not e.start then
+		self:load(e.loop, true, FADE)
+		return true
+	end
+	local start = self:load(e.start, false, FADE)
+	self.trackConn = start.Stopped:Connect(function()
+		if self.token ~= token then
+			return -- interrupted
+		end
+		self.trackConn:Disconnect()
+		self.trackConn = nil
+		if e.loop then
+			self:load(e.loop, true, 0) -- Start ends on the pose Loop begins with
+		else
+			self.track, self.anim, self.current, self.emoting, self.token = nil, nil, nil, false, nil
+			self:play("idle", FADE)
+		end
+		task.delay(0.1, function()
+			start:Destroy()
+		end)
+	end)
+	return true
+end
+
+function Controller:scale()
+	local ok, s = pcall(self.rig.GetScale, self.rig)
+	return ok and s or 1
+end
+
+function Controller:onRunning(speed)
+	speed /= self:scale()
+	if speed > 0.01 then
+		local runAt = tonumber(script:GetAttribute("RunSpeed")) or 18
+		self.moveSet = (speed >= runAt and self:resolve("run") == "run") and "run" or "walk"
+		self:play(self.moveSet, FADE)
+		self:fitSpeed(speed)
+		self.pose = "Running"
+	else
+		if not self.emoting then
+			self:play("idle", FADE)
+		end
+		self.pose = "Standing"
+	end
+end
+
+function Controller:step(dt)
+	if self.jumpTime > 0 then
+		self.jumpTime -= dt
+	end
+	local pose = self.pose
+	if pose == "FreeFall" and self.jumpTime <= 0 then
+		self:play("fall", FALL_FADE)
+	elseif pose == "Seated" then
+		self:play("sit", 0.5)
+	elseif pose == "Running" then
+		self:play(self.moveSet or "walk", FADE)
+	elseif pose == "Dead" or pose == "GettingUp" or pose == "FallingDown" or pose == "PlatformStanding" then
+		if self.track then
+			self:stopCurrent()
+		end
+	end
+end
+
+-- stops the tracks this controller did not start (another Animate's, from before it was disabled)
+function Controller:sweep()
+	if not self.alive then
+		return
+	end
+	for _, t in ipairs(self.animator:GetPlayingAnimationTracks()) do
+		if not self.owned[t] then
+			t:Stop(0)
+		end
+	end
+end
+
+function Controller:silence(inst)
+	if inst.Name == "Animate" and inst:IsA("BaseScript") and inst.Enabled then
+		inst.Enabled = false -- the default (or an old) Animate would fight over the same tracks
+		task.delay(0.2, self.sweep, self)
+	end
+end
+
+function Controller.new(rig)
+	local animator, hum = animatorOf(rig)
+	if not animator then
+		return nil
+	end
+	local self = setmetatable({ rig = rig, animator = animator, humanoid = hum, conns = {}, pose = "Standing",
+		jumpTime = 0, alive = true, owned = setmetatable({}, { __mode = "k" }) }, Controller)
+	local function on(signal, fn)
+		table.insert(self.conns, signal:Connect(fn))
+	end
+	for _, c in ipairs(rig:GetChildren()) do
+		self:silence(c)
+	end
+	on(rig.ChildAdded, function(c)
+		self:silence(c)
+	end)
+	self:sweep()
+	task.delay(1, self.sweep, self)
+	if hum then
+		on(hum.Running, function(speed)
+			self:onRunning(speed)
+		end)
+		on(hum.Jumping, function(active)
+			if active then
+				self:play("jump", FADE)
+				self.jumpTime, self.pose = JUMP_TIME, "Jumping"
+			end
+		end)
+		on(hum.FreeFalling, function(active)
+			if active then
+				if self.jumpTime <= 0 then
+					self:play("fall", FALL_FADE)
+				end
+				self.pose = "FreeFall"
+			end
+		end)
+		on(hum.Climbing, function(speed)
+			self:play("climb", FADE)
+			self:fitSpeed(speed / self:scale())
+			self.pose = "Climbing"
+		end)
+		on(hum.Swimming, function(speed)
+			self:play(speed > 1 and "swim" or "idle", FADE)
+			self.pose = speed > 1 and "Running" or "Standing"
+			self.moveSet = "swim"
+		end)
+		on(hum.Seated, function(active)
+			self.pose = active and "Seated" or "Standing"
+		end)
+		on(hum.GettingUp, function()
+			self.pose = "GettingUp"
+		end)
+		on(hum.FallingDown, function()
+			self.pose = "FallingDown"
+		end)
+		on(hum.PlatformStanding, function()
+			self.pose = "PlatformStanding"
+		end)
+		on(hum.Died, function()
+			self.pose = "Dead"
+			self:stopCurrent()
+		end)
+	end
+	on(rig:GetAttributeChangedSignal("UmaEmote"), function()
+		local name = rig:GetAttribute("UmaEmote")
+		if type(name) == "string" and name ~= "" then
+			self:emote(name)
+		end
+	end)
+	self:play("idle", FADE)
+	task.spawn(function()
+		while self.alive do
+			self:step(task.wait(0.1))
+		end
+	end)
+	return self
+end
+
+function Controller:destroy()
+	self.alive = false
+	for _, c in ipairs(self.conns) do
+		c:Disconnect()
+	end
+	self:stopCurrent(0)
+end
+
+---------------------------------------------------------------- finding rigs
+
+local function isUmaModel(inst)
+	return inst:IsA("Model") and (inst:GetAttribute("UmaCharaId") ~= nil or inst:FindFirstChild(RIG_FOLDER) ~= nil)
+end
+
+local function wanted(rig)
+	if not rig:IsDescendantOf(workspace) or rig:GetAttribute("UmaAnimateDisabled") then
+		return false
+	end
+	local owner = Players:GetPlayerFromCharacter(rig)
+	if side == "server" then
+		return owner == nil
+	end
+	return owner ~= nil and owner == Players.LocalPlayer
+end
+
+local evaluate
+evaluate = function(rig)
+	local want = wanted(rig)
+	local c = controllers[rig]
+	if want and not c then
+		if not (rig:FindFirstChildOfClass("Humanoid") or rig:FindFirstChildOfClass("AnimationController")) then
+			if not waiting[rig] then -- e.g. a Humanoid added by a script after the rig: try again then
+				waiting[rig] = rig.ChildAdded:Connect(function(child)
+					if child:IsA("Humanoid") or child:IsA("AnimationController") then
+						waiting[rig]:Disconnect()
+						waiting[rig] = nil
+						task.defer(evaluate, rig)
+					end
+				end)
+			end
+			return
+		end
+		controllers[rig] = true
+		task.spawn(function()
+			local ok, ctl = pcall(Controller.new, rig)
+			if not ok then
+				warn("[UmaAnimateHandler] " .. rig:GetFullName() .. ": " .. tostring(ctl))
+				ctl = nil
+			end
+			if controllers[rig] ~= true or not ctl or not wanted(rig) then
+				if ctl then
+					ctl:destroy()
+				end
+				if controllers[rig] == true then
+					controllers[rig] = nil
+				end
+				return
+			end
+			controllers[rig] = ctl
+		end)
+	elseif not want and c then
+		controllers[rig] = nil
+		if c ~= true then
+			c:destroy()
+		end
+	end
+	if not want and waiting[rig] and not rig:IsDescendantOf(workspace) then
+		waiting[rig]:Disconnect()
+		waiting[rig] = nil
+	end
+end
+
+local function consider(inst)
+	if isUmaModel(inst) then
+		task.defer(evaluate, inst) -- after its spawn has set Player.Character
+	end
+end
+
+local function checkBase()
+	for _, name in ipairs({ "idle", "walk" }) do
+		local _, total = animsIn(script:FindFirstChild("_" .. name))
+		if total == 0 then
+			note("base" .. name, string.format("%s._%s has no uploaded Animation: put your own %s Animation (its "
+				.. "AnimationId set) in it.%s", script:GetFullName(), name, name,
+				name == "idle" and " Rigs use their own uploaded UmaAnimate idle meanwhile." or ""))
+		end
+	end
+end
+
+local function start(which)
+	if side then
+		return
+	end
+	side = which
+	checkBase()
+	workspace.DescendantAdded:Connect(consider)
+	workspace.DescendantRemoving:Connect(function(inst)
+		if controllers[inst] or waiting[inst] then
+			task.defer(evaluate, inst)
+		end
+	end)
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		consider(inst)
+	end
+	local function hook(player) -- a character taken by a player (or released) changes sides
+		player.CharacterAdded:Connect(function(ch)
+			task.defer(evaluate, ch)
+		end)
+	end
+	if which == "server" then
+		Players.PlayerAdded:Connect(hook)
+		for _, p in ipairs(Players:GetPlayers()) do
+			hook(p)
+		end
+	else
+		hook(Players.LocalPlayer)
+		if Players.LocalPlayer.Character then
+			task.defer(evaluate, Players.LocalPlayer.Character)
+		end
+	end
+end
+
+---------------------------------------------------------------- API
+
+function Handler.Play(rig, name)
+	local c = controllers[rig]
+	if type(c) ~= "table" or type(name) ~= "string" or name == "" then
+		return false
+	end
+	return c:emote(name)
+end
+
+function Handler.Stop(rig)
+	local c = controllers[rig]
+	if type(c) == "table" then
+		c:stopCurrent()
+		c:play("idle", FADE)
+	end
+end
+
+function Handler.IsAnimating(rig)
+	return type(controllers[rig]) == "table"
+end
+
+function Handler.StartServer()
+	assert(IS_SERVER, "UmaAnimateHandler.StartServer runs on the server")
+	start("server")
+end
+
+-- /e and /emote: Uma emotes and extensions, then the default Animate's (wave, dance...) and catalog emotes
+local function chatEmote(name)
+	local ch = Players.LocalPlayer.Character
+	if not ch or Handler.Play(ch, name) then
+		return
+	end
+	local animate = ch:FindFirstChild("Animate")
+	local bindable = animate and animate:IsA("LocalScript") and animate.Enabled and animate:FindFirstChild("PlayEmote")
+	local ok, played = false, false
+	if bindable and bindable:IsA("BindableFunction") then
+		ok, played = pcall(bindable.Invoke, bindable, name)
+	end
+	local hum = ch:FindFirstChildOfClass("Humanoid")
+	if not (ok and played) and hum then
+		pcall(hum.PlayEmote, hum, name)
+	end
+end
+
+function Handler.StartClient()
+	assert(not IS_SERVER, "UmaAnimateHandler.StartClient runs on a client")
+	start("client")
+	local TextChatService = game:GetService("TextChatService")
+	if TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+		task.spawn(function()
+			local commands = TextChatService:WaitForChild("TextChatCommands", 10)
+			if not commands then
+				return
+			end
+			local builtin = commands:WaitForChild("RBXEmoteCommand", 5)
+			if builtin then
+				builtin.Enabled = false -- it only knows default and catalog emotes; chatEmote falls back to them
+			end
+			local cmd = Instance.new("TextChatCommand")
+			cmd.Name = "UmaEmoteCommand"
+			cmd.PrimaryAlias = "/e"
+			cmd.SecondaryAlias = "/emote"
+			cmd.Triggered:Connect(function(_, text)
+				local name = string.match(text, "^%S+%s+(%S+)")
+				if name then
+					chatEmote(name)
+				end
+			end)
+			cmd.Parent = commands
+		end)
+	else
+		Players.LocalPlayer.Chatted:Connect(function(msg)
+			local name = string.match(msg, "^/e%s+(%S+)") or string.match(msg, "^/emote%s+(%S+)")
+			if name then
+				chatEmote(name)
+			end
+		end)
+	end
+end
+
+return Handler
+]===]
+
+local HANDLER_SERVER_SOURCE = [===[
+-- Uma2Roblox: animates the Uma rigs that are not a player's character (NPCs). See ReplicatedStorage.UmaAnimateHandler.
+require(game:GetService("ReplicatedStorage"):WaitForChild("UmaAnimateHandler")).StartServer()
+]===]
+
+local HANDLER_CLIENT_SOURCE = [===[
+-- Uma2Roblox: animates this player's Uma character and adds /e for its emotes. See ReplicatedStorage.UmaAnimateHandler.
+require(game:GetService("ReplicatedStorage"):WaitForChild("UmaAnimateHandler")).StartClient()
+]===]
+
+local HANDLER_BASE = {
+	{ folder = "_idle", anim = "Idle", hint = "Your own uploaded IDLE animation(s): paste the AnimationId into Idle (or add more Animations; Weight = how often). A rig's own uploaded UmaAnimate idle wins." },
+	{ folder = "_walk", anim = "Walk", hint = "Your own uploaded WALK animation(s): paste the AnimationId into Walk. Optional SpeedAt1x attribute = speed (studs/s) the clip is made for. Add _run, _jump, _fall, _climb, _sit, _swim the same way." },
+}
+local HANDLER_EXAMPLES = { "Dance", "Umapyoi" }
+local EXTENSION_HINT = "/e %s = a random entry, /e %s1 or /e %s<name> = that one. An entry is an Animation (looped) or a Folder with Start and/or Loop. Any new Folder in UmaAnimateHandler is a new /e command."
+
+local function hasPlayable(set)
+	for _, a in ipairs(set and set:GetChildren() or {}) do
+		if a:IsA("Animation") and a.AnimationId ~= "" then
+			return true
+		end
+	end
+	return false
+end
+
+-- replaced rather than edited, as the other runtimes (a new Source did not always reach playtests); keeps children
+local function putScript(className, parent, name, source)
+	local old = parent:FindFirstChild(name)
+	if old and old.ClassName == className and old.Source == source then
+		return "current", old
+	end
+	local s = Instance.new(className)
+	s.Name = name
+	s.Source = source
+	if old then
+		for _, c in ipairs(old:GetChildren()) do
+			c.Parent = s
+		end
+		for k, v in pairs(old:GetAttributes()) do
+			s:SetAttribute(k, v)
+		end
+		old:Destroy()
+	end
+	s.Parent = parent
+	return old and "updated" or "added", s
+end
+
+-- an Animate script written for Uma2Roblox (its UmaAnimate reader), not Roblox's default
+local function isUmaAnimate(s)
+	return s:IsA("LocalScript") and string.find(s.Source, "UmaAnimate", 1, true) ~= nil
+end
+
+-- moves the old Animate's universal sets and dance folders into the handler, then parks the script in ServerStorage
+local function migrateAnimate(handler, lines)
+	local scs = game:GetService("StarterPlayer"):FindFirstChild("StarterCharacterScripts")
+	local old = scs and scs:FindFirstChild("Animate")
+	if not (old and isUmaAnimate(old)) then
+		return
+	end
+	local moved = {}
+	for _, name in ipairs({ "idle", "walk", "run", "jump", "fall", "climb", "sit", "swim" }) do
+		local set = old:FindFirstChild(name)
+		local target = handler:FindFirstChild("_" .. name)
+		if hasPlayable(set) and not hasPlayable(target) then
+			-- the old script also lists Roblox's default (R15) ids; they do not move bones, so only uploads are kept
+			local ids = {}
+			for _, a in ipairs(set:GetChildren()) do
+				if a:IsA("Animation") and a.AnimationId ~= "" and not string.find(a.AnimationId, "roblox.com/asset", 1, true) then
+					table.insert(ids, a)
+				end
+			end
+			local dup = name == "run" and hasPlayable(handler:FindFirstChild("_walk"))
+				and #ids == 1 and ids[1].AnimationId == (handler._walk:FindFirstChildWhichIsA("Animation") or {}).AnimationId
+			if #ids > 0 and not dup then
+				if not target then
+					target = Instance.new("Folder")
+					target.Name = "_" .. name
+					target.Parent = handler
+				end
+				for _, c in ipairs(target:GetChildren()) do
+					if c:IsA("Animation") and c.AnimationId == "" then
+						c:Destroy() -- the empty placeholder
+					end
+				end
+				for _, a in ipairs(ids) do
+					a:Clone().Parent = target
+				end
+				table.insert(moved, "_" .. name)
+			end
+		end
+	end
+	for _, f in ipairs(old:GetChildren()) do
+		if f:IsA("Folder") then
+			local name = f.Name == "Dances" and "Dance" or f.Name
+			local target = handler:FindFirstChild(name)
+			if target and #target:GetChildren() == 0 then
+				target:Destroy()
+				target = nil
+			end
+			if not target then
+				local copy = f:Clone()
+				copy.Name = name
+				copy:SetAttribute("Help", string.format(EXTENSION_HINT, name, name, name))
+				copy.Parent = handler
+				table.insert(moved, name)
+			end
+		end
+	end
+	old.Enabled = false
+	old.Name = OLD_ANIMATE_BACKUP
+	old.Parent = game:GetService("ServerStorage")
+	table.insert(lines, string.format("Moved the old Uma Animate script to ServerStorage (disabled)%s.",
+		#moved > 0 and ("; took over its " .. table.concat(moved, ", ")) or ""))
+end
+
+local function installAnimateHandler()
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local lines = {}
+	local clash = ReplicatedStorage:FindFirstChild(HANDLER_NAME)
+	if clash and not clash:IsA("ModuleScript") then
+		return nil, "ReplicatedStorage already has a " .. clash.ClassName .. " named " .. HANDLER_NAME .. "; rename it, then click again."
+	end
+	local result, handler = putScript("ModuleScript", ReplicatedStorage, HANDLER_NAME, HANDLER_SOURCE)
+	table.insert(lines, string.format("ReplicatedStorage.%s %s.", HANDLER_NAME,
+		result == "current" and "already up to date" or result))
+	for _, b in ipairs(HANDLER_BASE) do
+		local f = handler:FindFirstChild(b.folder)
+		if not f then
+			f = Instance.new("Folder")
+			f.Name = b.folder
+			f.Parent = handler
+		end
+		f:SetAttribute("Help", b.hint)
+	end
+	migrateAnimate(handler, lines)
+	for _, b in ipairs(HANDLER_BASE) do -- an empty Animation to paste the id into
+		local f = handler[b.folder]
+		if not f:FindFirstChildWhichIsA("Animation") then
+			local a = Instance.new("Animation")
+			a.Name = b.anim
+			a.AnimationId = ""
+			a.Parent = f
+		end
+	end
+	local extensions = 0
+	for _, f in ipairs(handler:GetChildren()) do
+		if f:IsA("Folder") and string.sub(f.Name, 1, 1) ~= "_" then
+			extensions += 1
+		end
+	end
+	if extensions == 0 then -- examples, so the layout explains itself
+		for _, name in ipairs(HANDLER_EXAMPLES) do
+			local f = Instance.new("Folder")
+			f.Name = name
+			f:SetAttribute("Help", string.format(EXTENSION_HINT, name, name, name))
+			f.Parent = handler
+		end
+	end
+	local r1 = putScript("Script", game:GetService("ServerScriptService"), HANDLER_SERVER, HANDLER_SERVER_SOURCE)
+	local r2 = putScript("LocalScript", game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"),
+		HANDLER_CLIENT, HANDLER_CLIENT_SOURCE)
+	table.insert(lines, string.format("ServerScriptService.%s %s (NPC rigs); StarterPlayerScripts.%s %s (the player's rig).",
+		HANDLER_SERVER, r1 == "current" and "up to date" or r1, HANDLER_CLIENT, r2 == "current" and "up to date" or r2))
+	local missing = {}
+	for _, b in ipairs(HANDLER_BASE) do
+		if not hasPlayable(handler[b.folder]) then
+			table.insert(missing, b.folder)
+		end
+	end
+	if #missing > 0 then
+		local msg = string.format("You must upload your OWN universal idle and walk animations and paste their "
+			.. "AnimationIds into the _idle and _walk folders of ReplicatedStorage.%s (still empty: %s); without "
+			.. "them rigs fall back to their own uploaded idle, else stand in rest pose.",
+			HANDLER_NAME, table.concat(missing, ", "))
+		table.insert(lines, "WARNING: " .. msg)
+		warn("[Uma2Roblox] " .. msg)
+	end
+	table.insert(lines, "/e commands: every other Folder in " .. HANDLER_NAME .. " (/e Dance, /e Dance3, /e Umapyoi2); /e Emote = the rig's own.")
+	return table.concat(lines, "\n")
+end
+
+label("Animation: ReplicatedStorage." .. HANDLER_NAME .. " animates every Uma rig in Workspace: a player's character from their client, the others (NPCs) from the server. Base animations go in its _idle and _walk folders (your own uploads); every other Folder in it is an /e command (/e Dance, /e Dance3). Replaces an old Uma Animate script.")
+button("Add " .. HANDLER_NAME .. " to this place", function()
+	local msg, err
+	record("Uma2Roblox: add " .. HANDLER_NAME, function()
+		msg, err = installAnimateHandler()
+	end)
+	status.Text = msg or err or (HANDLER_NAME .. " install failed (see Output).")
+end)
+end
 
 button("Place: remove PBR reflections (optional)", function()
 	record("Uma2Roblox: lighting", function()

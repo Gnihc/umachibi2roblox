@@ -162,10 +162,23 @@ also turns it into a character:
   `UmaAnimate`. Needs Studio's *CreateAssetAsync Luau API* beta feature. **Import Uma animations** and **Upload
   rig animations** are the highlighted buttons in the panel.
 
-Copy the rig to `StarterPlayer` as `StarterCharacter`. An Animate script that reads `UmaAnimate` uses its
-idle, and `/e Emote<n>` (`/e Emote` = a random one from `UmaAnimate.Emotes`) plays `Start`, then holds `Loop`
-until the player moves. `/e Dance` plays a random dance from the Animate script's own `Dances` folder (the same
-for every character), `/e Dance1` the one named `Dance1` there.
+Copy the rig to `StarterPlayer` as `StarterCharacter`, then click **Add UmaAnimateHandler to this place**.
+It adds `ReplicatedStorage.UmaAnimateHandler` (a ModuleScript), `ServerScriptService.UmaAnimateServer` and
+`StarterPlayerScripts.UmaAnimateClient`. The handler finds every Uma rig anywhere in Workspace: a player's
+character is animated by that player's client, every other rig (NPCs) by the server. It disables any `Animate`
+script on those rigs, and it takes over an older Uma `Animate` script: its walk and dance folders move into the
+handler, and the script goes to `ServerStorage`, disabled.
+
+* **`_idle`, `_walk`**: the universal base animations. **Upload your own** idle and walk, and paste their
+  AnimationIds into the `Idle` / `Walk` Animations there. A rig's own uploaded `UmaAnimate` idle wins over
+  `_idle`. Optional: `_run`, `_jump`, `_fall`, `_climb`, `_sit`, `_swim`. A `SpeedAt1x` attribute (studs/s)
+  scales the clip's speed with the rig's speed.
+* **Every other Folder** is an `/e` command: `/e Dance` = a random entry of `Dance`, `/e Dance3` = its entry
+  named `Dance3` or `3` (else its 3rd one), the same for `Umapyoi` or any folder you add. An entry is an
+  Animation (looped until the player moves) or a Folder with `Start` (played once) and/or `Loop`.
+* `/e Emote<n>` (`/e Emote` = a random one) plays the rig's own `UmaAnimate.Emotes`.
+* Scripts: `UmaAnimateHandler.Play(rig, "Dance3")`, `.Stop(rig)`, or `rig:SetAttribute("UmaEmote", "Dance3")`
+  from anywhere. `UmaAnimateDisabled = true` on a rig leaves it alone.
 6. Click **Sync with Uma2Roblox app** (allow the localhost request the first time). Those characters
    are now marked *in Studio* and drop off the "not ported" list.
 
