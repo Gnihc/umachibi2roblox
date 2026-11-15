@@ -17,6 +17,12 @@ expressions:
 |---|---|
 | ![Tamamo Cross running in Roblox Studio](docs/media/tamamo-cross-run.gif) | ![Hokko Tarumae playing a reaction animation in Roblox Studio](docs/media/hokko-tarumae-reaction.gif) |
 
+### Porting example
+From UmaViewer to a playable character in about two minutes: export Special Week, import her in Studio, apply
+the plugin, upload her animations, add UmaAnimateHandler, then play and `/e Emote` (click to watch):
+
+[![Porting Special Week from UmaViewer to a playable Roblox character](docs/media/porting-example.jpg)](docs/media/porting-example.mp4)
+
 Every ported clip lands in the **Animation Editor**, ready to preview, tweak and publish:
 
 ![Hokko Tarumae with a ported clip open in the Roblox Animation Editor](docs/media/animation-editor.png)
@@ -195,10 +201,19 @@ handler, and the script goes to `ServerStorage`, disabled.
 
 ### Hair, tail and skirt physics (SmartBone 2)
 The minis' swing bones (`Sp_*`: hair, tail, ribbons, skirt/jacket, bust) can move with
-SmartBone 2 at runtime. SmartBone isn't included here: insert your
-copy of the SmartBone 2 ModuleScript into the place (anywhere), then in the plugin click
-**Integrate SmartBone 2 into this place**. If it's somewhere unusual, select it in the Explorer first, or enter its
-asset id in the panel. The button:
+SmartBone 2 at runtime. In the plugin, click **Integrate SmartBone 2 into this place**; it asks where SmartBone
+comes from:
+* **Use the provided SmartBone 2 (v0.5.2)**: the copy that comes with the plugin, the
+  [SmartBone 2](https://github.com/smartbone-org/SmartBone-2) v0.5.2 release (MIT License), which the patch
+  below was tested with. No download needed.
+* **Download the latest release from GitHub**: the newest stable release's `.rbxm` (Studio asks to allow
+  `api.github.com` and GitHub's download hosts the first time). A newer version may not take the patch; the
+  plugin says so.
+* **Keep …**: shown when the place already has one (selected in the Explorer, anywhere in the place, or the
+  asset id entered in the panel).
+
+A provided or downloaded copy becomes `ReplicatedStorage.SmartBone`; one already there is moved to
+`ServerStorage` as `SmartBone (replaced)`. Then the button:
 * moves SmartBone to ReplicatedStorage and patches it for the minis' bone axes (the patch only acts on rigs the
   plugin sets up, other SmartBone objects behave as before; tested with SmartBone 2 v0.5.2),
 * adds `StarterPlayerScripts.UmaChibiSmartBone`, which gives every model tagged **`UmaChibi`** spring physics

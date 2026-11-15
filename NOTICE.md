@@ -10,4 +10,7 @@ The MIT license in `LICENSE` covers **only the source code in this repository**.
   Anything this tool produces from them (`.pmx`, `.glb`, textures, animation files) is derived from
   copyrighted material. **Do not redistribute it**, and check Cygames' fan-work guidelines, the game's
   Terms of Service and Roblox's Terms of Use before uploading or publishing anything.
+* The Studio plugin (`roblox/Uma2Roblox.plugin.lua`) carries a copy of
+  [SmartBone 2](https://github.com/smartbone-org/SmartBone-2) v0.5.2 (its release `.rbxm`, base64-encoded),
+  Copyright (c) 2024 SmartBone, under the MIT License; its license applies to that copy.
 * You are responsible for how you use this software. It is intended for personal, non-commercial use.
