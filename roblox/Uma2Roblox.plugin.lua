@@ -2840,11 +2840,13 @@ button("Add " .. FACE_SCRIPT .. " to this place", function()
 end)
 
 ---------------------------------------------------------------- UmaAnimateHandler
--- Replaces the place's Animate script for Uma rigs. ReplicatedStorage.UmaAnimateHandler (a ModuleScript) finds every
--- Uma rig anywhere in Workspace (a Model with UmaCharaId or a UmaAnimate folder) and animates it on one side:
---   a player's character  by that player's client (StarterPlayerScripts.UmaAnimateClient), so it replicates
---   any other rig (NPC)   by the server (ServerScriptService.UmaAnimateServer)
+-- Replaces the place's Animate script for Uma rigs. ReplicatedStorage.UmaAnimateHandler (a ModuleScript), started by
+-- ServerScriptService.UmaAnimateCaller, finds every Uma rig added anywhere in Workspace (a Model with UmaCharaId or a
+-- UmaAnimate folder), checks its owner (Players:GetPlayerFromCharacter) and copies one of its two scripts into it:
+--   a player's character  UmaAnimateClient (a LocalScript: runs on that player's client, so it replicates)
+--   any other rig (NPC)   UmaAnimateServer (a Script: runs on the server)
 -- Its children:
+--   UmaAnimateClient, UmaAnimateServer: those two scripts (inert here, in ReplicatedStorage)
 --   _idle, _walk (and optionally _run, _jump, _fall, _climb, _sit, _swim): the universal base animations, one or more
 --           Animations each (several = picked at random by a Weight NumberValue/attribute). A rig's own UmaAnimate
 --           set of the same name (its idle) wins when uploaded. These are the user's own uploads.
@@ -2853,6 +2855,7 @@ end)
 --           "Start" (played once) and/or "Loop" (then held until the player moves).
 do -- (its own scope: the main chunk is near Luau's limit of 200 locals)
 local HANDLER_NAME = "UmaAnimateHandler"
+local HANDLER_CALLER = "UmaAnimateCaller"
 local HANDLER_SERVER = "UmaAnimateServer"
 local HANDLER_CLIENT = "UmaAnimateClient"
 local OLD_ANIMATE_BACKUP = "Animate (old, replaced by UmaAnimateHandler)"
@@ -2860,8 +2863,11 @@ local OLD_ANIMATE_BACKUP = "Animate (old, replaced by UmaAnimateHandler)"
 local HANDLER_SOURCE = [===[
 -- UmaAnimateHandler (Uma2Roblox): animates every Uma rig in Workspace, at any depth.
 --
---   a player's character  animated by that player's client (StarterPlayerScripts.UmaAnimateClient)
---   any other Uma rig     animated by the server (ServerScriptService.UmaAnimateServer): NPCs
+-- ServerScriptService.UmaAnimateCaller starts it on the server. Every Uma rig added to Workspace then gets a copy of
+-- one of the two scripts in this module, by its owner (Players:GetPlayerFromCharacter):
+--   a player's character  UmaAnimateClient (LocalScript): animated by that player's client, so it replicates
+--   any other Uma rig     UmaAnimateServer (Script): animated by the server (NPCs)
+-- A rig that becomes a player's character later swaps its script.
 --
 -- A Uma rig is a Model with a UmaCharaId attribute or a UmaAnimate folder, and a Humanoid or AnimationController.
 -- Set the rig's UmaAnimateDisabled attribute to true to leave it alone. Its Animate script, if any, is disabled.
@@ -2885,6 +2891,7 @@ local HANDLER_SOURCE = [===[
 --
 -- SCRIPTING:
 --   Handler.Play(rig, "Dance3")   plays an emote on a rig this side animates (server: NPCs; client: own character)
+--   Handler.IsAnimating(rig)      whether this side animates it
 --   Handler.Stop(rig)             back to idle
 --   rig:SetAttribute("UmaEmote", "Umapyoi2")   the same from anywhere (server: also for players' characters)
 
@@ -2901,7 +2908,7 @@ local FALL_FADE = 0.3
 local JUMP_TIME = 0.3
 
 local IS_SERVER = RunService:IsServer()
-local side = nil -- "server" / "client", once started
+local started = false
 local controllers = {} -- rig -> controller (or true while it starts)
 local waiting = {} -- rig -> connection, rigs without a Humanoid/AnimationController yet
 local warned = {}
@@ -3347,74 +3354,66 @@ function Controller:destroy()
 	self:stopCurrent(0)
 end
 
----------------------------------------------------------------- finding rigs
+---------------------------------------------------------------- per-rig scripts
+
+-- templates (children of this module, inert in ReplicatedStorage), copied into each rig by the server
+local CLIENT_SCRIPT = "UmaAnimateClient" -- a player's character: runs on that player's client, so it replicates
+local SERVER_SCRIPT = "UmaAnimateServer" -- any other rig (NPC): runs on the server
+local COPY_MARK = "UmaAnimateCopy"
 
 local function isUmaModel(inst)
 	return inst:IsA("Model") and (inst:GetAttribute("UmaCharaId") ~= nil or inst:FindFirstChild(RIG_FOLDER) ~= nil)
 end
 
-local function wanted(rig)
-	if not rig:IsDescendantOf(workspace) or rig:GetAttribute("UmaAnimateDisabled") then
-		return false
-	end
-	local owner = Players:GetPlayerFromCharacter(rig)
-	if side == "server" then
-		return owner == nil
-	end
-	return owner ~= nil and owner == Players.LocalPlayer
+local function drives(rig)
+	return rig:FindFirstChildOfClass("Humanoid") or rig:FindFirstChildOfClass("AnimationController")
 end
 
-local evaluate
-evaluate = function(rig)
-	local want = wanted(rig)
-	local c = controllers[rig]
-	if want and not c then
-		if not (rig:FindFirstChildOfClass("Humanoid") or rig:FindFirstChildOfClass("AnimationController")) then
-			if not waiting[rig] then -- e.g. a Humanoid added by a script after the rig: try again then
-				waiting[rig] = rig.ChildAdded:Connect(function(child)
-					if child:IsA("Humanoid") or child:IsA("AnimationController") then
-						waiting[rig]:Disconnect()
-						waiting[rig] = nil
-						task.defer(evaluate, rig)
-					end
-				end)
+-- server: gives the rig the script for its owner (Players:GetPlayerFromCharacter), and takes the other one away
+local assign
+assign = function(rig)
+	if not rig:IsDescendantOf(workspace) then
+		return
+	end
+	local want
+	if not rig:GetAttribute("UmaAnimateDisabled") then
+		want = Players:GetPlayerFromCharacter(rig) and CLIENT_SCRIPT or SERVER_SCRIPT
+	end
+	for _, name in ipairs({ CLIENT_SCRIPT, SERVER_SCRIPT }) do
+		local s = rig:FindFirstChild(name)
+		if s and name ~= want and s:GetAttribute(COPY_MARK) then
+			s:Destroy()
+			local c = controllers[rig]
+			if name == SERVER_SCRIPT and type(c) == "table" then -- the script's connections went with it; stop its tracks
+				controllers[rig] = nil
+				c:destroy()
 			end
-			return
-		end
-		controllers[rig] = true
-		task.spawn(function()
-			local ok, ctl = pcall(Controller.new, rig)
-			if not ok then
-				warn("[UmaAnimateHandler] " .. rig:GetFullName() .. ": " .. tostring(ctl))
-				ctl = nil
-			end
-			if controllers[rig] ~= true or not ctl or not wanted(rig) then
-				if ctl then
-					ctl:destroy()
-				end
-				if controllers[rig] == true then
-					controllers[rig] = nil
-				end
-				return
-			end
-			controllers[rig] = ctl
-		end)
-	elseif not want and c then
-		controllers[rig] = nil
-		if c ~= true then
-			c:destroy()
 		end
 	end
-	if not want and waiting[rig] and not rig:IsDescendantOf(workspace) then
-		waiting[rig]:Disconnect()
-		waiting[rig] = nil
+	if not want or rig:FindFirstChild(want) then
+		return
 	end
-end
-
-local function consider(inst)
-	if isUmaModel(inst) then
-		task.defer(evaluate, inst) -- after its spawn has set Player.Character
+	if not drives(rig) then
+		if not waiting[rig] then -- e.g. a Humanoid added by a script after the rig: try again then
+			waiting[rig] = rig.ChildAdded:Connect(function(child)
+				if child:IsA("Humanoid") or child:IsA("AnimationController") then
+					waiting[rig]:Disconnect()
+					waiting[rig] = nil
+					task.defer(assign, rig)
+				end
+			end)
+		end
+		return
 	end
+	local template = script:FindFirstChild(want)
+	if not template then
+		note("template" .. want, script:GetFullName() .. " has no " .. want .. " script; click 'Add UmaAnimateHandler to "
+			.. "this place' in the Uma2Roblox plugin again.")
+		return
+	end
+	local copy = template:Clone()
+	copy:SetAttribute(COPY_MARK, true)
+	copy.Parent = rig
 end
 
 local function checkBase()
@@ -3428,41 +3427,150 @@ local function checkBase()
 	end
 end
 
-local function start(which)
-	if side then
+---------------------------------------------------------------- /e (client)
+
+-- /e and /emote: Uma emotes and extensions, then the default Animate's (wave, dance...) and catalog emotes
+local function chatEmote(name)
+	local ch = Players.LocalPlayer.Character
+	if not ch or Handler.Play(ch, name) then
 		return
 	end
-	side = which
+	local animate = ch:FindFirstChild("Animate")
+	local bindable = animate and animate:IsA("LocalScript") and animate.Enabled and animate:FindFirstChild("PlayEmote")
+	local ok, played = false, false
+	if bindable and bindable:IsA("BindableFunction") then
+		ok, played = pcall(bindable.Invoke, bindable, name)
+	end
+	local hum = ch:FindFirstChildOfClass("Humanoid")
+	if not (ok and played) and hum then
+		pcall(hum.PlayEmote, hum, name)
+	end
+end
+
+-- connected again by each character's script (a destroyed script's connections go with it), never twice
+local chatConn
+local function hookChat()
+	if chatConn then
+		chatConn:Disconnect()
+		chatConn = nil
+	end
+	local TextChatService = game:GetService("TextChatService")
+	if TextChatService.ChatVersion ~= Enum.ChatVersion.TextChatService then
+		chatConn = Players.LocalPlayer.Chatted:Connect(function(msg)
+			local name = string.match(msg, "^/e%s+(%S+)") or string.match(msg, "^/emote%s+(%S+)")
+			if name then
+				chatEmote(name)
+			end
+		end)
+		return
+	end
+	local commands = TextChatService:WaitForChild("TextChatCommands", 10)
+	if not commands then
+		return
+	end
+	local cmd = commands:FindFirstChild("UmaEmoteCommand")
+	if not cmd then
+		local builtin = commands:WaitForChild("RBXEmoteCommand", 5)
+		if builtin then
+			builtin.Enabled = false -- it only knows default and catalog emotes; chatEmote falls back to them
+		end
+		cmd = Instance.new("TextChatCommand")
+		cmd.Name = "UmaEmoteCommand"
+		cmd.PrimaryAlias = "/e"
+		cmd.SecondaryAlias = "/emote"
+		cmd.Parent = commands
+	end
+	chatConn = cmd.Triggered:Connect(function(_, text)
+		local name = string.match(text, "^%S+%s+(%S+)")
+		if name then
+			chatEmote(name)
+		end
+	end)
+end
+
+---------------------------------------------------------------- API
+
+-- The server caller (ServerScriptService.UmaAnimateCaller): finds Uma rigs added anywhere in Workspace and gives
+-- each the script for its owner.
+function Handler.StartServer()
+	assert(IS_SERVER, "UmaAnimateHandler.StartServer runs on the server")
+	if started then
+		return
+	end
+	started = true
 	checkBase()
+	local function consider(inst)
+		if isUmaModel(inst) then
+			task.defer(assign, inst) -- after its spawn has set Player.Character
+		end
+	end
 	workspace.DescendantAdded:Connect(consider)
 	workspace.DescendantRemoving:Connect(function(inst)
-		if controllers[inst] or waiting[inst] then
-			task.defer(evaluate, inst)
+		if waiting[inst] then
+			waiting[inst]:Disconnect()
+			waiting[inst] = nil
 		end
 	end)
 	for _, inst in ipairs(workspace:GetDescendants()) do
 		consider(inst)
 	end
-	local function hook(player) -- a character taken by a player (or released) changes sides
+	local function hook(player) -- a rig taken as a character changes sides
 		player.CharacterAdded:Connect(function(ch)
-			task.defer(evaluate, ch)
+			task.defer(assign, ch)
 		end)
 	end
-	if which == "server" then
-		Players.PlayerAdded:Connect(hook)
-		for _, p in ipairs(Players:GetPlayers()) do
-			hook(p)
-		end
-	else
-		hook(Players.LocalPlayer)
-		if Players.LocalPlayer.Character then
-			task.defer(evaluate, Players.LocalPlayer.Character)
-		end
+	Players.PlayerAdded:Connect(hook)
+	for _, p in ipairs(Players:GetPlayers()) do
+		hook(p)
 	end
 end
 
----------------------------------------------------------------- API
+-- The copied scripts: animates the rig on this side until the script or the rig leaves.
+function Handler.Animate(rig, runner)
+	if typeof(rig) ~= "Instance" or not rig:IsA("Model") or controllers[rig] then
+		return
+	end
+	if not IS_SERVER and rig ~= Players.LocalPlayer.Character then
+		return -- only the owner animates a character
+	end
+	controllers[rig] = true
+	local ok, ctl = pcall(Controller.new, rig)
+	if not ok then
+		warn("[UmaAnimateHandler] " .. rig:GetFullName() .. ": " .. tostring(ctl))
+	end
+	if not (ok and ctl) or controllers[rig] ~= true then
+		if ok and ctl then
+			ctl:destroy()
+		end
+		if controllers[rig] == true then
+			controllers[rig] = nil
+		end
+		return
+	end
+	controllers[rig] = ctl
+	local conns = {}
+	local function check()
+		if runner and runner.Parent == rig and rig:IsDescendantOf(workspace) then
+			return
+		end
+		for _, c in ipairs(conns) do
+			c:Disconnect()
+		end
+		if controllers[rig] == ctl then
+			controllers[rig] = nil
+		end
+		ctl:destroy()
+	end
+	if runner then
+		table.insert(conns, runner.AncestryChanged:Connect(check))
+	end
+	table.insert(conns, rig.AncestryChanged:Connect(check))
+	if not IS_SERVER then
+		task.spawn(hookChat)
+	end
+end
 
+-- plays an emote on a rig animated on this side (server: NPCs; client: its own character)
 function Handler.Play(rig, name)
 	local c = controllers[rig]
 	if type(c) ~= "table" or type(name) ~= "string" or name == "" then
@@ -3483,76 +3591,24 @@ function Handler.IsAnimating(rig)
 	return type(controllers[rig]) == "table"
 end
 
-function Handler.StartServer()
-	assert(IS_SERVER, "UmaAnimateHandler.StartServer runs on the server")
-	start("server")
-end
-
--- /e and /emote: Uma emotes and extensions, then the default Animate's (wave, dance...) and catalog emotes
-local function chatEmote(name)
-	local ch = Players.LocalPlayer.Character
-	if not ch or Handler.Play(ch, name) then
-		return
-	end
-	local animate = ch:FindFirstChild("Animate")
-	local bindable = animate and animate:IsA("LocalScript") and animate.Enabled and animate:FindFirstChild("PlayEmote")
-	local ok, played = false, false
-	if bindable and bindable:IsA("BindableFunction") then
-		ok, played = pcall(bindable.Invoke, bindable, name)
-	end
-	local hum = ch:FindFirstChildOfClass("Humanoid")
-	if not (ok and played) and hum then
-		pcall(hum.PlayEmote, hum, name)
-	end
-end
-
-function Handler.StartClient()
-	assert(not IS_SERVER, "UmaAnimateHandler.StartClient runs on a client")
-	start("client")
-	local TextChatService = game:GetService("TextChatService")
-	if TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
-		task.spawn(function()
-			local commands = TextChatService:WaitForChild("TextChatCommands", 10)
-			if not commands then
-				return
-			end
-			local builtin = commands:WaitForChild("RBXEmoteCommand", 5)
-			if builtin then
-				builtin.Enabled = false -- it only knows default and catalog emotes; chatEmote falls back to them
-			end
-			local cmd = Instance.new("TextChatCommand")
-			cmd.Name = "UmaEmoteCommand"
-			cmd.PrimaryAlias = "/e"
-			cmd.SecondaryAlias = "/emote"
-			cmd.Triggered:Connect(function(_, text)
-				local name = string.match(text, "^%S+%s+(%S+)")
-				if name then
-					chatEmote(name)
-				end
-			end)
-			cmd.Parent = commands
-		end)
-	else
-		Players.LocalPlayer.Chatted:Connect(function(msg)
-			local name = string.match(msg, "^/e%s+(%S+)") or string.match(msg, "^/emote%s+(%S+)")
-			if name then
-				chatEmote(name)
-			end
-		end)
-	end
-end
-
 return Handler
 ]===]
 
-local HANDLER_SERVER_SOURCE = [===[
--- Uma2Roblox: animates the Uma rigs that are not a player's character (NPCs). See ReplicatedStorage.UmaAnimateHandler.
+local HANDLER_CALLER_SOURCE = [===[
+-- Uma2Roblox: finds the Uma rigs added to Workspace and gives each UmaAnimateClient (a player's character) or
+-- UmaAnimateServer (an NPC). See ReplicatedStorage.UmaAnimateHandler.
 require(game:GetService("ReplicatedStorage"):WaitForChild("UmaAnimateHandler")).StartServer()
 ]===]
 
+local HANDLER_SERVER_SOURCE = [===[
+-- Uma2Roblox: animates this NPC Uma rig from the server. Copied in by UmaAnimateHandler (ReplicatedStorage).
+require(game:GetService("ReplicatedStorage"):WaitForChild("UmaAnimateHandler")).Animate(script.Parent, script)
+]===]
+
 local HANDLER_CLIENT_SOURCE = [===[
--- Uma2Roblox: animates this player's Uma character and adds /e for its emotes. See ReplicatedStorage.UmaAnimateHandler.
-require(game:GetService("ReplicatedStorage"):WaitForChild("UmaAnimateHandler")).StartClient()
+-- Uma2Roblox: animates this player's Uma character from their client and adds /e. Copied in by UmaAnimateHandler
+-- (ReplicatedStorage).
+require(game:GetService("ReplicatedStorage"):WaitForChild("UmaAnimateHandler")).Animate(script.Parent, script)
 ]===]
 
 local HANDLER_BASE = {
@@ -3704,11 +3760,21 @@ local function installAnimateHandler()
 			f.Parent = handler
 		end
 	end
-	local r1 = putScript("Script", game:GetService("ServerScriptService"), HANDLER_SERVER, HANDLER_SERVER_SOURCE)
-	local r2 = putScript("LocalScript", game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"),
-		HANDLER_CLIENT, HANDLER_CLIENT_SOURCE)
-	table.insert(lines, string.format("ServerScriptService.%s %s (NPC rigs); StarterPlayerScripts.%s %s (the player's rig).",
-		HANDLER_SERVER, r1 == "current" and "up to date" or r1, HANDLER_CLIENT, r2 == "current" and "up to date" or r2))
+	-- the per-rig scripts live in the handler; the server caller copies them into the rigs
+	putScript("LocalScript", handler, HANDLER_CLIENT, HANDLER_CLIENT_SOURCE)
+	putScript("Script", handler, HANDLER_SERVER, HANDLER_SERVER_SOURCE)
+	local sss = game:GetService("ServerScriptService")
+	local sps = game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts")
+	for _, pair in ipairs({ { sss, HANDLER_SERVER }, { sps, HANDLER_CLIENT } }) do
+		local old = pair[1]:FindFirstChild(pair[2])
+		if old and old:IsA("LuaSourceContainer") and string.find(old.Source, HANDLER_NAME, 1, true) then
+			table.insert(lines, "Removed " .. old:GetFullName() .. " (it is inside " .. HANDLER_NAME .. " now).")
+			old:Destroy() -- the earlier layout: one script per side for every rig
+		end
+	end
+	local r1 = putScript("Script", sss, HANDLER_CALLER, HANDLER_CALLER_SOURCE)
+	table.insert(lines, string.format("ServerScriptService.%s %s: gives each Uma rig in Workspace %s (a player's) or "
+		.. "%s (an NPC).", HANDLER_CALLER, r1 == "current" and "up to date" or r1, HANDLER_CLIENT, HANDLER_SERVER))
 	local missing = {}
 	for _, b in ipairs(HANDLER_BASE) do
 		if not hasPlayable(handler[b.folder]) then
@@ -3727,7 +3793,7 @@ local function installAnimateHandler()
 	return table.concat(lines, "\n")
 end
 
-label("Animation: ReplicatedStorage." .. HANDLER_NAME .. " animates every Uma rig in Workspace: a player's character from their client, the others (NPCs) from the server. Base animations go in its _idle and _walk folders (your own uploads); every other Folder in it is an /e command (/e Dance, /e Dance3). Replaces an old Uma Animate script.")
+label("Animation: ReplicatedStorage." .. HANDLER_NAME .. " animates every Uma rig in Workspace. ServerScriptService." .. HANDLER_CALLER .. " gives each rig " .. HANDLER_CLIENT .. " (a player's character, run by their client) or " .. HANDLER_SERVER .. " (an NPC, run by the server). Base animations go in its _idle and _walk folders (your own uploads); every other Folder in it is an /e command (/e Dance, /e Dance3). Replaces an old Uma Animate script.")
 button("Add " .. HANDLER_NAME .. " to this place", function()
 	local msg, err
 	record("Uma2Roblox: add " .. HANDLER_NAME, function()

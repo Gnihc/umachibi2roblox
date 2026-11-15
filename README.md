@@ -163,9 +163,11 @@ also turns it into a character:
   rig animations** are the highlighted buttons in the panel.
 
 Copy the rig to `StarterPlayer` as `StarterCharacter`, then click **Add UmaAnimateHandler to this place**.
-It adds `ReplicatedStorage.UmaAnimateHandler` (a ModuleScript), `ServerScriptService.UmaAnimateServer` and
-`StarterPlayerScripts.UmaAnimateClient`. The handler finds every Uma rig anywhere in Workspace: a player's
-character is animated by that player's client, every other rig (NPCs) by the server. It disables any `Animate`
+It adds `ReplicatedStorage.UmaAnimateHandler` (a ModuleScript holding the `UmaAnimateClient` LocalScript and
+the `UmaAnimateServer` Script) and the server caller `ServerScriptService.UmaAnimateCaller`. The caller finds
+every Uma rig added anywhere in Workspace, checks its owner (`Players:GetPlayerFromCharacter`) and copies in
+`UmaAnimateClient` for a player's character (animated by that player's client) or `UmaAnimateServer` for an
+NPC (animated by the server); a rig that becomes a character later swaps scripts. It disables any `Animate`
 script on those rigs, and it takes over an older Uma `Animate` script: its walk and dance folders move into the
 handler, and the script goes to `ServerStorage`, disabled.
 
