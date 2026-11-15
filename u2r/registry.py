@@ -100,6 +100,31 @@ class Registry:
             }
 
     # ------------------------------------------------------------------ animations
+    def resolve(self, model: str, cid=None, costume: str | None = None) -> str | None:
+        """Sidecar name (the .glb name without extension) of a rig: the name the plugin sent, or else the export
+        of that Uma id and costume (a rig renamed in Studio still carries its UmaCharaId / UmaCostume)."""
+        model = os.path.basename(model or "")
+        base = self.out_dir or ""
+        if model and os.path.exists(os.path.join(base, model + ".json")):
+            return model
+        try:
+            cid = int(cid)
+        except (TypeError, ValueError):
+            return None
+        costume = os.path.basename(costume or "00")
+        with self._lock:
+            glb = (self.entries.get(self.key(cid, costume)) or {}).get("glb")
+        if glb:
+            name = os.path.splitext(os.path.basename(glb))[0]
+            if os.path.exists(os.path.join(base, name + ".json")):
+                return name
+        prefix = f"Uma_{cid}_{costume}_"
+        try:
+            found = sorted(f[:-5] for f in os.listdir(base) if f.startswith(prefix) and f.endswith(".json"))
+        except OSError:
+            return None
+        return found[0] if found else None
+
     def _model_meta(self, model: str):
         model = os.path.basename(model)
         p = os.path.join(self.out_dir or "", model + ".json")
@@ -108,21 +133,26 @@ class Registry:
         with open(p, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def anims_index(self, model: str) -> dict | None:
-        meta = self._model_meta(model)
-        if meta is None:
+    def anims_index(self, model: str, cid=None, costume=None) -> dict | None:
+        model = self.resolve(model, cid, costume)
+        meta = model and self._model_meta(model)
+        if not meta:
             return None
         return {"model": model, "skeleton": meta.get("skeleton", []), "animations": meta.get("animations", []),
                 "exportPose": meta.get("exportPose")}
 
-    def physics(self, model: str) -> dict | None:
+    def physics(self, model: str, cid=None, costume=None) -> dict | None:
         """Swing-bone physics from the sidecar, with the skeleton the plugin fits GLB space with."""
-        meta = self._model_meta(model)
-        if meta is None or not meta.get("physics"):
+        model = self.resolve(model, cid, costume)
+        meta = model and self._model_meta(model)
+        if not meta or not meta.get("physics"):
             return None
         return {"model": model, "skeleton": meta.get("skeleton", []), **meta["physics"]}
 
-    def anim(self, model: str, name: str) -> dict | None:
+    def anim(self, model: str, name: str, cid=None, costume=None) -> dict | None:
+        model = self.resolve(model, cid, costume)
+        if not model:
+            return None
         p = os.path.join(self.out_dir or "", "anims", os.path.basename(model), os.path.basename(name) + ".json")
         if not os.path.exists(p):
             return None
@@ -153,14 +183,15 @@ class Registry:
                 path = u.path.rstrip("/")
                 if path == "/uma2roblox/status":
                     return self._send(200, reg.status_json())
+                ident = (q.get("id"), q.get("costume"))
                 if path == "/uma2roblox/anims":
-                    r = reg.anims_index(q.get("model", ""))
+                    r = reg.anims_index(q.get("model", ""), *ident)
                     return self._send(200, r) if r is not None else self._send(404, {"error": "unknown model"})
                 if path == "/uma2roblox/physics":
-                    r = reg.physics(q.get("model", ""))
+                    r = reg.physics(q.get("model", ""), *ident)
                     return self._send(200, r) if r is not None else self._send(404, {"error": "no physics for this model"})
                 if path == "/uma2roblox/anim":
-                    r = reg.anim(q.get("model", ""), q.get("name", ""))
+                    r = reg.anim(q.get("model", ""), q.get("name", ""), *ident)
                     return self._send(200, r) if r is not None else self._send(404, {"error": "unknown animation"})
                 self._send(404, {"error": "not found"})
 

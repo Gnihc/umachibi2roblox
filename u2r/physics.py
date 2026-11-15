@@ -88,11 +88,23 @@ def convert_container(tt: dict, part: str, skel, ex, A: np.ndarray, gltf_names: 
     """Spring chains and colliders of one container, in GLB units/axes. gltf_names: game bone -> GLB bone."""
     k = ex.k
     chains = []
+    rig_names = set(gltf_names.values())
     for e in tt.get("springParam") or []:
         elems = [e] + list(e.get("_childElements") or [])
         bones = [_bone(x, gltf_names.get(x["_boneName"], x["_boneName"]), k) for x in elems]
+        in_rig = [b["name"] in rig_names for b in bones]
+        # The PMX export drops the unweighted tip bone of a chain, so the rig's last bone has no child to say
+        # which way the strand hangs (a single-bone strand would be read as pointing up, away from the head).
+        # The game skeleton still has that tip: store the offset to it (a GLB-space vector) as the bone's tail.
+        for i in range(len(elems) - 1):
+            if in_rig[i] and not in_rig[i + 1]:
+                a, b = skel.by_name.get(elems[i]["_boneName"]), skel.by_name.get(elems[i + 1]["_boneName"])
+                if a is not None and b is not None and skel.parents[b] == a:
+                    tail = A @ ex.L[a] @ ex.lpos[b] * k
+                    if np.linalg.norm(tail) > 1e-6:
+                        bones[i]["tail"] = tail.round(6).tolist()
         chains.append({"part": part, "root": bones[0]["name"],
-                       "inRig": [b["name"] in gltf_names.values() for b in bones],
+                       "inRig": in_rig,
                        "moveRate": round(float(e.get("MoveSpringApplyRate", 1.0)), 4),
                        "colliders": list(e.get("_collisionNameList") or []),
                        "bones": bones})

@@ -84,6 +84,37 @@ local function parseName(name)
 	return id and tonumber(id), costume
 end
 
+-- Which Uma a rig is: its UmaCharaId / UmaCostume / UmaSource attributes, written as soon as the import is seen,
+-- so the rig keeps them when it is renamed (StarterCharacter) or copied; the model name is only the fallback.
+local function umaIdentity(model)
+	local id, costume = parseName(model.Name)
+	id = tonumber(model:GetAttribute("UmaCharaId")) or id
+	costume = model:GetAttribute("UmaCostume") or costume or (id and "00")
+	return id, costume, model:GetAttribute("UmaSource") or model.Name
+end
+
+local function stampIdentity(model)
+	local id, costume = parseName(model.Name)
+	if id and model:GetAttribute("UmaCharaId") == nil then
+		model:SetAttribute("UmaCharaId", id)
+		model:SetAttribute("UmaCostume", costume)
+	end
+	if id and model:GetAttribute("UmaSource") == nil then
+		model:SetAttribute("UmaSource", model.Name) -- the .glb name
+	end
+end
+
+-- Query string the app finds this rig's sidecar with: the .glb name, plus the Uma id and costume so it still
+-- finds it when that name is not the .glb's (a rig renamed before it had UmaSource, or a re-export).
+local function umaQuery(model)
+	local id, costume, source = umaIdentity(model)
+	local q = "model=" .. HttpService:UrlEncode(source)
+	if id then
+		q ..= "&id=" .. id .. "&costume=" .. HttpService:UrlEncode(costume)
+	end
+	return q, source
+end
+
 local function selectedModels()
 	local found, seen = {}, {}
 	for _, inst in ipairs(Selection:Get()) do
@@ -390,7 +421,6 @@ local function applyToonLight(model)
 end
 
 local function applyToon(model)
-	local id, costume = parseName(model.Name)
 	local count = 0
 	for _, d in ipairs(model:GetDescendants()) do
 		if d:IsA("MeshPart") then
@@ -450,14 +480,8 @@ local function applyToon(model)
 		hl:Destroy()
 	end
 
-	if id then
-		model:SetAttribute("UmaCharaId", id)
-		model:SetAttribute("UmaCostume", costume)
-	end
+	stampIdentity(model)
 	model:SetAttribute("UmaToon", true)
-	if not model:GetAttribute("UmaSource") then
-		model:SetAttribute("UmaSource", model.Name) -- the .glb name, used to fetch its animations
-	end
 	return count, lit
 end
 
@@ -1128,9 +1152,8 @@ local function fingerprint(s)
 end
 
 local function buildAnimateFolder(model, names, holder)
-	local id, costume = parseName(model.Name)
-	id = model:GetAttribute("UmaCharaId") or id
-	costume = model:GetAttribute("UmaCostume") or costume or "00"
+	local id, costume = umaIdentity(model)
+	costume = costume or "00"
 	local have = {}
 	for _, n in ipairs(names) do
 		have[n] = true
@@ -1272,8 +1295,9 @@ local function buildAnimateFolder(model, names, holder)
 end
 
 local function importAnimations(model, report)
-	local source = model:GetAttribute("UmaSource") or model.Name
-	local index = fetchJson("/anims?model=" .. HttpService:UrlEncode(source))
+	stampIdentity(model)
+	local query, source = umaQuery(model)
+	local index = fetchJson("/anims?" .. query)
 	if not index.animations or #index.animations == 0 then
 		report(source .. ": no animations ported yet (enable 'Port mini animations' in the app).")
 		return 0
@@ -1298,7 +1322,7 @@ local function importAnimations(model, report)
 	local n, blinks = 0, 0
 	for i, name in ipairs(index.animations) do
 		report(string.format("%s: animation %d/%d %s", source, i, #index.animations, name))
-		local anim = fetchJson("/anim?model=" .. HttpService:UrlEncode(source) .. "&name=" .. HttpService:UrlEncode(name))
+		local anim = fetchJson("/anim?" .. query .. "&name=" .. HttpService:UrlEncode(name))
 		if cfg.smoothBlinks then
 			blinks += smoothBlinks(anim, headName)
 		end
@@ -1377,7 +1401,7 @@ local function uploadRigAnimations(model, report)
 	end
 	local holder = animSaveFolder(model)
 	local creatorId, creatorType, ownerText = placeOwner()
-	local source = model:GetAttribute("UmaSource") or model.Name
+	local _, _, source = umaIdentity(model)
 	local done, failed, uploaded = 0, {}, {}
 	for i, a in ipairs(list) do
 		local clip = a:GetAttribute("UmaClip")
@@ -1462,11 +1486,11 @@ end
 -- as JSON in bone space); the UmaChibiSmartBone runtime turns them into SmartBone settings, scaled to the rig's
 -- size at that moment, so the rig can be rescaled later.
 local SPRING_ATTRS = { "UmaSpringStiffness", "UmaSpringDrag", "UmaSpringGravity", "UmaSpringRadius", "UmaSpringLimit", "UmaSpringPart",
-	"UmaSpringCollideWith" }
+	"UmaSpringCollideWith", "UmaSpringTail" }
 
 local function importPhysics(model)
-	local source = model:GetAttribute("UmaSource") or model.Name
-	local ok, data = pcall(fetchJson, "/physics?model=" .. HttpService:UrlEncode(source))
+	stampIdentity(model)
+	local ok, data = pcall(fetchJson, "/physics?" .. (umaQuery(model)))
 	if not ok then
 		return nil, tostring(data)
 	end
@@ -1477,6 +1501,9 @@ local function importPhysics(model)
 		end
 	end
 	local fit = fitSpace(data.skeleton, bonesByName)
+	local function boneSpace(bone, v) -- GLB-space vector -> the bone's space (GLB metres)
+		return bone.WorldCFrame:VectorToObjectSpace(fit.R:VectorToWorldSpace(Vector3.new(v[1], v[2], v[3])))
+	end
 	local bones = 0
 	for _, chain in ipairs(data.chains or {}) do
 		local root = bonesByName[chain.root]
@@ -1495,6 +1522,9 @@ local function importPhysics(model)
 					local l = b.limit
 					bone:SetAttribute("UmaSpringLimit", math.max(l[1], l[2], l[4], l[5]))
 				end
+				if b.tail then -- offset to the chain's tip bone, which the rig does not have (GLB metres, bone space)
+					bone:SetAttribute("UmaSpringTail", boneSpace(bone, b.tail))
+				end
 				bones += 1
 			end
 		end
@@ -1504,8 +1534,7 @@ local function importPhysics(model)
 		local bone = bonesByName[c.bone]
 		if bone and not c.inner then -- SmartBone has no keep-inside colliders
 			local function loc(v)
-				local w = fit.R:VectorToWorldSpace(Vector3.new(v[1], v[2], v[3]))
-				local p = bone.WorldCFrame:VectorToObjectSpace(w)
+				local p = boneSpace(bone, v)
 				return { p.X, p.Y, p.Z }
 			end
 			table.insert(cols, { name = c.name, bone = c.bone, type = c.type, a = loc(c.a), b = c.b and loc(c.b), radius = c.radius })
@@ -1749,6 +1778,31 @@ local function rootOf(model)
 	return model.PrimaryPart or model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("RootPart")
 end
 
+-- Where the tail bone SmartBone adds past a chain's last bone goes (RestTail, studs in bone space; read by the
+-- plugin's patch). The rig has no tip bones, so by default SmartBone would point that tail along the parent ->
+-- bone line, which for a single-bone strand on the head or hips points up and flips the strand over. The game's
+-- tip offset (UmaSpringTail) is used when the rig has it; otherwise a strand straight off a body bone whose
+-- parent -> bone line points up (head hair, back of the skirt, waist ribbons) hangs down instead.
+local TAIL_FALLBACK = 0.3 -- fallback tail length, as a fraction of the distance from the body bone
+local TAIL_UP = 0.4 -- the parent -> bone line counts as pointing up above this (cosine to the rig's up)
+local function setTails(model, rp)
+	local s = studsPerMetre(model)
+	for _, d in ipairs(rp:GetDescendants()) do
+		if isSpring(d) and not excluded(d.Name) and not d:FindFirstChildWhichIsA("Bone") then
+			local tail = d:GetAttribute("UmaSpringTail")
+			if typeof(tail) == "Vector3" and s then
+				setDefault(d, "RestTail", tail * s)
+			elseif not isSpring(d.Parent) then
+				local p = d.Parent
+				local line = d.WorldPosition - (p:IsA("Bone") and p.WorldPosition or p.Position)
+				if line.Magnitude > 1e-4 and line.Unit:Dot(rp.CFrame.UpVector) > TAIL_UP then
+					setDefault(d, "RestTail", d.WorldCFrame:VectorToObjectSpace(-rp.CFrame.UpVector) * line.Magnitude * TAIL_FALLBACK)
+				end
+			end
+		end
+	end
+end
+
 local function enable(model)
 	local rp = rootOf(model)
 	if not (rp and rp:IsA("BasePart")) or CollectionService:HasTag(rp, "SmartBone") then
@@ -1765,6 +1819,7 @@ local function enable(model)
 		setDefault(rp, k, v)
 	end
 	applyGamePhysics(model, rp, string.split(rp:GetAttribute("Roots"), ","))
+	setTails(model, rp)
 	for _, d in ipairs(rp:GetDescendants()) do
 		if isSpring(d) then
 			setDefault(d, "RotationLimit", ROTATION_LIMIT)
@@ -1822,8 +1877,8 @@ end
 -- SmartBone 2 turns each bone so that its +Y axis points at its child, i.e. it expects bones to point +Y along
 -- the chain (Blender's convention). The importer's bones all rest unrotated, so a hanging chain flipped ~180
 -- degrees and twisted the hair and skirt. These patches make SmartBone measure each bone against the direction
--- to its child at rest instead, and grow the tail bone it adds to a chain's last bone along the parent -> bone
--- line. SmartBone also reads the animated pose from the bones' CFrames, which it writes itself: the springs
+-- to its child at rest instead, and grow the tail bone it adds to a chain's last bone toward the bone's RestTail
+-- (the game's tip, set by the UmaChibi runtime), else along the parent -> bone line. SmartBone also reads the animated pose from the bones' CFrames, which it writes itself: the springs
 -- then pull toward wherever the bones already are, and chains never come back to rest. With the patch the
 -- animated pose is the rest pose taken at load times the animation's Transform.
 -- They only act on RootParts with the RestAxisFromChild attribute (set by the UmaChibi runtime), so other
@@ -1913,6 +1968,15 @@ local SB_PATCHES = {
 		add = "\n\t\t\t" .. SB_MARK .. ": the tail continues the parent -> bone line\n"
 			.. '\t\t\tif RootPart:GetAttribute("RestAxisFromChild") and (Bone.WorldPosition - ParentWorldPosition).Magnitude > 1e-5 then\n'
 			.. "\t\t\t\tStart = Bone.WorldCFrame + (Bone.WorldPosition - ParentWorldPosition)\n"
+			.. "\t\t\tend",
+	},
+	{ -- after the patch above (a copy patched by an older plugin has it already), so this one wins
+		path = {},
+		find = "\t\t\t\tStart = Bone.WorldCFrame + (Bone.WorldPosition - ParentWorldPosition)\n\t\t\tend",
+		add = "\n\t\t\t" .. SB_MARK .. ": a tail the rig gives (RestTail, bone space) wins: the strand's real tip\n"
+			.. '\t\t\tlocal RestTail = RootPart:GetAttribute("RestAxisFromChild") and Bone:GetAttribute("RestTail")\n'
+			.. '\t\t\tif typeof(RestTail) == "Vector3" and RestTail.Magnitude > 1e-5 then\n'
+			.. "\t\t\t\tStart = Bone.WorldCFrame + Bone.WorldCFrame:VectorToWorldSpace(RestTail)\n"
 			.. "\t\t\tend",
 	},
 	{
@@ -2211,6 +2275,9 @@ local function setupWhenImported(model)
 	end)
 end
 workspace.ChildAdded:Connect(function(child)
+	if child:IsA("Model") and parseName(child.Name) then
+		stampIdentity(child) -- the Uma id travels with the rig from now on, whatever it gets renamed to
+	end
 	if onImportOptions() then
 		setupWhenImported(child)
 	end

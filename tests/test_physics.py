@@ -54,7 +54,7 @@ class GD:
                               collider("Col_Plane", "Hip", 3, (0, 0, 0))])                     # planes are skipped
         if n == HEAD_CLOTH:
             return container([spring("Head", 150, 900, 300, 0.03, limit=(30, 15, 0),
-                                     children=[spring("Unused", 150, 800, 400, 0.05)], cols=["Col_Head", "Col_Arm"])],
+                                     children=[spring("Ear_01_L", 150, 800, 400, 0.05)], cols=["Col_Head", "Col_Arm"])],
                              [collider("Col_Head", "Head", 0, (0, 0.1, 0), r=0.2),
                               collider("Col_Arm", "Head", 2, (0.1, 0, 0), (0.3, 0, 0), r=0.05),
                               collider("Col_In", "Head", 0, (0, 0, 0.2), r=0.3, inner=1),
@@ -83,6 +83,10 @@ def main():
     assert abs(b0["radius"] - 0.03 * k) < 1e-5 and abs(b1["radius"] - 0.05 * k) < 1e-5     # game units -> GLB metres
     assert b0["limit"] == [30, 15, 0, 30, 15, 0] and b1["limit"] is None
     assert chains["Spine"]["part"] == "body"
+    # the chain's tip bone is in the game skeleton but not in the rig: its offset is the last rig bone's tail
+    A0 = np.array(json.load(open(r.meta, encoding="utf-8"))["unityToGltf"], float)
+    assert np.allclose(b0["tail"], A0 * np.array([-1.6, 11.4 - 7, 0]) * 0.08 * k, atol=1e-5), b0
+    assert "tail" not in b1 and "tail" not in chains["Spine"]["bones"][0]
 
     cols = {c["name"]: c for c in phys["colliders"]}
     assert set(cols) == {"Col_Hip", "Col_Head", "Col_Arm", "Col_In"}, list(cols)
@@ -103,6 +107,12 @@ def main():
     reg.out_dir = os.path.dirname(r.meta)
     resp = reg.physics(os.path.basename(r.meta)[:-5])
     assert resp["chains"] == phys["chains"] and resp["skeleton"] and resp["colliders"]
+    # a rig renamed in Studio (StarterCharacter) is still found by its Uma id and costume
+    name = os.path.basename(r.meta)[:-5]
+    assert name.startswith("Uma_1001_00_"), name
+    assert reg.physics("StarterCharacter", "1001", "00")["model"] == name
+    assert reg.anims_index("StarterCharacter", 1001, "00")["model"] == name
+    assert reg.physics("StarterCharacter") is None and reg.physics("StarterCharacter", "1002", "00") is None
     print(f"physics ok: {len(phys['chains'])} chains, {len(phys['colliders'])} colliders, unit scale {k:.4f}")
 
 
