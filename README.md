@@ -152,7 +152,7 @@ also turns it into a character:
   height above the soles to the top of the head. That gap is the R15 `Humanoid`'s HipHeight, so the legs
   step over stairs and only the root collides. The `AnimationController` is replaced by the Humanoid's `Animator`.
 * An `UmaAnimate` folder in the Animate script's format: `idle` (the outfit's own idle if it has one,
-  else `idle01`, its `_loop` clip) and an `Emotes` folder with an `Emote<n>` for every other clip set of the
+  else `idle01`, its `_loop` clip) and an `Emote` folder with an `Emote<n>` for every other clip set of the
   character (`res`, `mot`, `act`, …, from all its outfits, e.g. `chr1005_20_res01`): `Start` = `<x>_s`,
   `Loop` = `<x>_loop`. Reactions come first, then `mot`, `act` and the rest; each `Emote<n>`'s value says which
   clip it is (`res01`, `mot01`, `res01 (costume 20)`).
@@ -171,14 +171,17 @@ NPC (animated by the server); a rig that becomes a character later swaps scripts
 script on those rigs, and it takes over an older Uma `Animate` script: its walk and dance folders move into the
 handler, and the script goes to `ServerStorage`, disabled.
 
-* **`_idle`, `_walk`**: the universal base animations. **Upload your own** idle and walk, and paste their
-  AnimationIds into the `Idle` / `Walk` Animations there. A rig's own uploaded `UmaAnimate` idle wins over
-  `_idle`. Optional: `_run`, `_jump`, `_fall`, `_climb`, `_sit`, `_swim`. A `SpeedAt1x` attribute (studs/s)
-  scales the clip's speed with the rig's speed.
-* **Every other Folder** is an `/e` command: `/e Dance` = a random entry of `Dance`, `/e Dance3` = its entry
-  named `Dance3` or `3` (else its 3rd one), the same for `Umapyoi` or any folder you add. An entry is an
-  Animation (looped until the player moves) or a Folder with `Start` (played once) and/or `Loop`.
-* `/e Emote<n>` (`/e Emote` = a random one) plays the rig's own `UmaAnimate.Emotes`.
+* **`_walk`**: the universal walk. **Upload your own** and paste its AnimationId into the `Walk` Animation
+  there; the plugin and the game warn while it is empty.
+* **Idle** comes from each rig's own uploaded `UmaAnimate.idle` (import and upload its animations). A rig
+  without one gets a warning in Output and uses the optional universal `_idle`, else stands in rest pose.
+  Optional too: `_run`, `_jump`, `_fall`, `_climb`, `_sit`, `_swim`. A `SpeedAt1x` attribute (studs/s) scales
+  the clip's speed with the rig's speed.
+* **Every other Folder** is an `/e` command for every rig: `/e Dance` = a random entry of `Dance`, `/e Dance3`
+  = its entry named `Dance3` or `3` (else its 3rd one), the same for `Umapyoi` or any folder you add. An entry
+  is an Animation (looped until the player moves) or a Folder with `Start` (played once) and/or `Loop`.
+* **A rig's own commands** are the Folders in its `UmaAnimate`, tried first: the plugin makes `Emote`
+  (`/e Emote<n>`, `/e Emote` = a random one). The install renames `Emotes` from older imports to `Emote`.
 * Scripts: `UmaAnimateHandler.Play(rig, "Dance3")`, `.Stop(rig)`, or `rig:SetAttribute("UmaEmote", "Dance3")`
   from anywhere. `UmaAnimateDisabled = true` on a rig leaves it alone.
 6. Click **Sync with Uma2Roblox app** (allow the localhost request the first time). Those characters

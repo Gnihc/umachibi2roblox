@@ -1142,14 +1142,14 @@ end
 -- The rig's own animations for UmaAnimateHandler (and older Uma Animate scripts), in the Animate format (a StringValue per animation set holding
 -- Animation instances, each with an optional Weight NumberValue), in a "UmaAnimate" folder on the rig:
 --   idle    the costume's own idle if it has one (alt outfits), else the character's idle01 (its _loop clip)
---   Emotes.Emote<n>  one per non-idle clip set of the character (res, mot, act, ..., from every outfit), in an
---           "Emotes" folder: Animation "Start" (<x>_s) then "Loop" (<x>_loop), played by /e Emote<n> (/e Emote = a
+--   Emote.Emote<n>  one per non-idle clip set of the character (res, mot, act, ..., from every outfit), in an
+--           "Emote" folder: Animation "Start" (<x>_s) then "Loop" (<x>_loop), played by /e Emote<n> (/e Emote = a
 --           random one). Numbered res first, then mot, act, others; this outfit, the base outfit, then the others.
 --           The StringValue's Value says which clip it is ("res01", "mot01", "res01 (costume 20)").
 -- AnimationIds start empty; "Upload rig animations" fills them in, and importing again keeps them for clips that
 -- did not change.
 local ANIMATE_FOLDER = "UmaAnimate"
-local EMOTES_FOLDER = "Emotes"
+local EMOTES_FOLDER = "Emote" -- the rig's own /e command, as UmaAnimateHandler's Dance, Umapyoi
 
 -- FNV-1a of a string, as hex: tells an uploaded clip from a changed one when the rig is imported again.
 local function fingerprint(s)
@@ -2874,7 +2874,8 @@ local HANDLER_SOURCE = [===[
 --
 -- BASE ANIMATIONS: the folders starting with "_" in this module. Put your OWN uploaded Animations in them (an
 -- Animation with its AnimationId set; an empty AnimationId is skipped):
---   _idle  standing        _walk  moving
+--   _walk  moving: needed (a warning in Output while it is empty)
+--   _idle  standing: optional; each rig's own uploaded UmaAnimate.idle is used first (a warning for a rig without)
 --   optional: _run (from RunSpeed studs/s, an attribute of this module, default 18), _jump, _fall, _climb, _sit, _swim
 -- Missing ones fall back: run -> walk -> idle, jump/fall/sit -> idle, climb/swim -> walk.
 -- Several Animations in one = picked at random by their Weight (NumberValue child or attribute, default 1).
@@ -2882,10 +2883,11 @@ local HANDLER_SOURCE = [===[
 -- clip then speeds up and slows down with the rig. A rig's own UmaAnimate.<name> set (its idle, from the
 -- Uma2Roblox plugin) wins over the universal one once it is uploaded.
 --
--- /e EXTENSIONS: every other Folder in this module.
+-- /e COMMANDS: every other Folder in this module (universal), and every Folder in a rig's UmaAnimate (that rig's
+-- own, tried first; the plugin makes its Emote folder).
 --   /e Dance      a random entry of the folder "Dance"
 --   /e Dance3     its entry named "Dance3" or "3", else its 3rd entry
---   /e Emote, /e Emote2   the rig's own emotes (UmaAnimate.Emotes, from the plugin)
+--   /e Emote, /e Emote2   the rig's own emotes (UmaAnimate.Emote; "Emotes" from older plugins works too)
 -- An entry is an Animation (looped until the player moves), or a Folder/StringValue holding "Start" (played once)
 -- and/or "Loop" (then looped). Anything not found goes to the default Animate / catalog emotes.
 --
@@ -2901,7 +2903,7 @@ local RunService = game:GetService("RunService")
 local Handler = {}
 
 local RIG_FOLDER = "UmaAnimate"
-local RIG_EMOTES = "Emotes"
+local RIG_EMOTES = "Emote"
 local FALLBACK = { run = "walk", walk = "idle", jump = "idle", fall = "idle", sit = "idle", climb = "walk", swim = "walk" }
 local FADE = 0.1
 local FALL_FADE = 0.3
@@ -3014,48 +3016,53 @@ local function findIn(container, prefix, lname, pattern)
 	return n and list[n] or nil
 end
 
-local function findEmote(rig, name)
-	local lname = string.lower(name)
-	-- the rig's own emotes: /e Emote, /e Emote3
-	local folder = rig:FindFirstChild(RIG_FOLDER)
-	if folder then
-		local emotes = folder:FindFirstChild(RIG_EMOTES)
-		local e = emotes and findIn(emotes, "emote", lname) or (not emotes and findIn(folder, "emote", lname, "^[Ee]mote%d+$"))
-		if e then
-			return e
+-- the command folders in parent, with their /e name ("Emotes", from older plugins, is /e Emote)
+local function commandFolders(parent)
+	local list = {}
+	for _, f in ipairs(parent and parent:GetChildren() or {}) do
+		if isExtension(f) then
+			local cmd = string.lower(f.Name)
+			table.insert(list, { folder = f, cmd = cmd == "emotes" and RIG_EMOTES:lower() or cmd })
 		end
 	end
-	-- the extension folders: the longest folder name the command starts with
+	return list
+end
+
+local function findInFolders(list, lname)
+	-- the longest folder name the command starts with
 	local best
-	for _, f in ipairs(script:GetChildren()) do
-		local fname = string.lower(f.Name)
-		if isExtension(f) and string.sub(lname, 1, #fname) == fname and (not best or #fname > #best.Name) then
-			best = f
+	for _, c in ipairs(list) do
+		if string.sub(lname, 1, #c.cmd) == c.cmd and (not best or #c.cmd > #best.cmd) then
+			best = c
 		end
 	end
-	local e = best and findIn(best, string.lower(best.Name), lname)
+	local e = best and findIn(best.folder, best.cmd, lname)
 	if e then
 		return e
 	end
-	-- an entry of any extension folder by its own name
-	for _, f in ipairs(script:GetChildren()) do
-		if isExtension(f) then
-			local c = f:FindFirstChild(name)
-			e = c and entryFrom(string.lower(f.Name), c)
-			if e then
-				return e
-			end
-			for _, c2 in ipairs(f:GetChildren()) do
-				if string.lower(c2.Name) == lname then
-					e = entryFrom(string.lower(f.Name), c2)
-					if e then
-						return e
-					end
+	-- an entry of any of them by its own name
+	for _, c in ipairs(list) do
+		for _, child in ipairs(c.folder:GetChildren()) do
+			if string.lower(child.Name) == lname then
+				e = entryFrom(c.cmd, child)
+				if e then
+					return e
 				end
 			end
 		end
 	end
 	return nil
+end
+
+-- the rig's own command folders first (UmaAnimate.Emote: /e Emote, /e Emote3), then the universal ones
+local function findEmote(rig, name)
+	local lname = string.lower(name)
+	local own = rig:FindFirstChild(RIG_FOLDER)
+	local e = findInFolders(commandFolders(own), lname)
+	if not e and own and string.sub(lname, 1, 5) == "emote" then -- rigs from older plugins: Emote<n> next to idle
+		e = findIn(own, "emote", lname, "^[Ee]mote%d+$")
+	end
+	return e or findInFolders(commandFolders(script), lname)
 end
 
 ---------------------------------------------------------------- one rig
@@ -3369,6 +3376,20 @@ local function drives(rig)
 	return rig:FindFirstChildOfClass("Humanoid") or rig:FindFirstChildOfClass("AnimationController")
 end
 
+-- a rig without an uploaded idle of its own (UmaAnimate.idle): once per character/outfit
+local function checkOwnIdle(rig)
+	local own = rig:FindFirstChild(RIG_FOLDER)
+	local _, total = animsIn(own and own:FindFirstChild("idle"))
+	if total > 0 then
+		return
+	end
+	local _, universal = animsIn(script:FindFirstChild("_idle"))
+	local id = rig:GetAttribute("UmaSource") or rig.Name
+	note("idle:" .. tostring(id), string.format("%s (%s) has no idle animation of its own (UmaAnimate.idle with an "
+		.. "uploaded AnimationId); it %s. Import and upload its animations with the Uma2Roblox plugin.",
+		rig:GetFullName(), tostring(id), universal > 0 and ("uses " .. script.Name .. "._idle") or "stands in rest pose"))
+end
+
 -- server: gives the rig the script for its owner (Players:GetPlayerFromCharacter), and takes the other one away
 local assign
 assign = function(rig)
@@ -3389,6 +3410,9 @@ assign = function(rig)
 				c:destroy()
 			end
 		end
+	end
+	if want then
+		checkOwnIdle(rig)
 	end
 	if not want or rig:FindFirstChild(want) then
 		return
@@ -3417,13 +3441,10 @@ assign = function(rig)
 end
 
 local function checkBase()
-	for _, name in ipairs({ "idle", "walk" }) do
-		local _, total = animsIn(script:FindFirstChild("_" .. name))
-		if total == 0 then
-			note("base" .. name, string.format("%s._%s has no uploaded Animation: put your own %s Animation (its "
-				.. "AnimationId set) in it.%s", script:GetFullName(), name, name,
-				name == "idle" and " Rigs use their own uploaded UmaAnimate idle meanwhile." or ""))
-		end
+	local _, total = animsIn(script:FindFirstChild("_walk"))
+	if total == 0 then
+		note("base_walk", script:GetFullName() .. "._walk has no uploaded Animation: put your own walk Animation (its "
+			.. "AnimationId set) in it; moving rigs stand still meanwhile.")
 	end
 end
 
@@ -3612,8 +3633,8 @@ require(game:GetService("ReplicatedStorage"):WaitForChild("UmaAnimateHandler")).
 ]===]
 
 local HANDLER_BASE = {
-	{ folder = "_idle", anim = "Idle", hint = "Your own uploaded IDLE animation(s): paste the AnimationId into Idle (or add more Animations; Weight = how often). A rig's own uploaded UmaAnimate idle wins." },
-	{ folder = "_walk", anim = "Walk", hint = "Your own uploaded WALK animation(s): paste the AnimationId into Walk. Optional SpeedAt1x attribute = speed (studs/s) the clip is made for. Add _run, _jump, _fall, _climb, _sit, _swim the same way." },
+	{ folder = "_idle", anim = "Idle", hint = "Optional: a universal IDLE for rigs without an uploaded idle of their own (UmaAnimate.idle, which always wins). Paste an AnimationId into Idle (or add more Animations; Weight = how often)." },
+	{ folder = "_walk", anim = "Walk", required = true, hint = "Your own uploaded WALK animation(s): paste the AnimationId into Walk. Optional SpeedAt1x attribute = speed (studs/s) the clip is made for. Add _run, _jump, _fall, _climb, _sit, _swim the same way." },
 }
 local HANDLER_EXAMPLES = { "Dance", "Umapyoi" }
 local EXTENSION_HINT = "/e %s = a random entry, /e %s1 or /e %s<name> = that one. An entry is an Animation (looped) or a Folder with Start and/or Loop. Any new Folder in UmaAnimateHandler is a new /e command."
@@ -3775,25 +3796,45 @@ local function installAnimateHandler()
 	local r1 = putScript("Script", sss, HANDLER_CALLER, HANDLER_CALLER_SOURCE)
 	table.insert(lines, string.format("ServerScriptService.%s %s: gives each Uma rig in Workspace %s (a player's) or "
 		.. "%s (an NPC).", HANDLER_CALLER, r1 == "current" and "up to date" or r1, HANDLER_CLIENT, HANDLER_SERVER))
-	local missing = {}
-	for _, b in ipairs(HANDLER_BASE) do
-		if not hasPlayable(handler[b.folder]) then
-			table.insert(missing, b.folder)
-		end
-	end
-	if #missing > 0 then
-		local msg = string.format("You must upload your OWN universal idle and walk animations and paste their "
-			.. "AnimationIds into the _idle and _walk folders of ReplicatedStorage.%s (still empty: %s); without "
-			.. "them rigs fall back to their own uploaded idle, else stand in rest pose.",
-			HANDLER_NAME, table.concat(missing, ", "))
+	if not hasPlayable(handler._walk) then
+		local msg = string.format("You must upload your OWN universal walk animation and paste its AnimationId into "
+			.. "ReplicatedStorage.%s._walk; moving rigs stand still without it.", HANDLER_NAME)
 		table.insert(lines, "WARNING: " .. msg)
 		warn("[Uma2Roblox] " .. msg)
 	end
-	table.insert(lines, "/e commands: every other Folder in " .. HANDLER_NAME .. " (/e Dance, /e Dance3, /e Umapyoi2); /e Emote = the rig's own.")
+	-- the rigs' own emote folder is Emote now (as Dance, Umapyoi); and each rig should have an idle of its own
+	local renamed, noIdle = 0, {}
+	for _, root in ipairs({ workspace, game:GetService("StarterPlayer"), ReplicatedStorage, game:GetService("ServerStorage") }) do
+		for _, d in ipairs(root:GetDescendants()) do
+			if d:IsA("Model") and isUmaModel(d) and not (d.Parent and d.Parent:IsA("Model") and isUmaModel(d.Parent)) then
+				local own = d:FindFirstChild(ANIMATE_FOLDER)
+				local old = own and own:FindFirstChild("Emotes")
+				if old and old:IsA("Folder") and not own:FindFirstChild(EMOTES_FOLDER) then
+					old.Name = EMOTES_FOLDER
+					renamed += 1
+				end
+				if not hasPlayable(own and own:FindFirstChild("idle")) then
+					table.insert(noIdle, d:GetFullName())
+				end
+			end
+		end
+	end
+	if renamed > 0 then
+		table.insert(lines, string.format("Renamed %d rig(s)' %s.Emotes to %s.%s.", renamed, ANIMATE_FOLDER,
+			ANIMATE_FOLDER, EMOTES_FOLDER))
+	end
+	if #noIdle > 0 then
+		local msg = string.format("%d rig(s) have no idle animation of their own (%s.idle with an uploaded "
+			.. "AnimationId): %s. Import their animations, then 'Upload rig animations'; until then they use %s._idle "
+			.. "if it is set, else stand in rest pose.", #noIdle, ANIMATE_FOLDER, table.concat(noIdle, ", "), HANDLER_NAME)
+		table.insert(lines, "WARNING: " .. msg)
+		warn("[Uma2Roblox] " .. msg)
+	end
+	table.insert(lines, "/e commands: every other Folder in " .. HANDLER_NAME .. " (/e Dance, /e Dance3, /e Umapyoi2); /e Emote = the rig's own UmaAnimate.Emote.")
 	return table.concat(lines, "\n")
 end
 
-label("Animation: ReplicatedStorage." .. HANDLER_NAME .. " animates every Uma rig in Workspace. ServerScriptService." .. HANDLER_CALLER .. " gives each rig " .. HANDLER_CLIENT .. " (a player's character, run by their client) or " .. HANDLER_SERVER .. " (an NPC, run by the server). Base animations go in its _idle and _walk folders (your own uploads); every other Folder in it is an /e command (/e Dance, /e Dance3). Replaces an old Uma Animate script.")
+label("Animation: ReplicatedStorage." .. HANDLER_NAME .. " animates every Uma rig in Workspace. ServerScriptService." .. HANDLER_CALLER .. " gives each rig " .. HANDLER_CLIENT .. " (a player's character, run by their client) or " .. HANDLER_SERVER .. " (an NPC, run by the server). Put your own uploaded walk in its _walk folder (_idle is optional: each rig's own idle comes first); every other Folder in it is an /e command for all rigs (/e Dance, /e Dance3), and each rig's UmaAnimate.Emote its own (/e Emote). Replaces an old Uma Animate script.")
 button("Add " .. HANDLER_NAME .. " to this place", function()
 	local msg, err
 	record("Uma2Roblox: add " .. HANDLER_NAME, function()
