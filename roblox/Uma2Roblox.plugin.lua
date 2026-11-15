@@ -533,13 +533,24 @@ local function collectBones(model)
 end
 
 -- glTF space -> Roblox world: p_roblox = t + R * (s * p_gltf)
+-- The fit is made in the rig's own space (the part its bones hang under), where the glTF axes land on an axis
+-- rotation however the rig is turned in the world; fitted in world space, a rig at 30 degrees of yaw got the
+-- nearest axis rotation and every collider, tail and animation came out turned by the rest.
 local function fitSpace(skeleton, bonesByName)
+	local frame = CFrame.identity
+	for _, bone in pairs(bonesByName) do
+		local part = bone:FindFirstAncestorWhichIsA("BasePart")
+		if part then
+			frame = part.CFrame
+			break
+		end
+	end
 	local g, p = {}, {}
 	for _, b in ipairs(skeleton) do
 		local bone = bonesByName[b.name]
 		if bone then
 			table.insert(g, Vector3.new(b.world[1], b.world[2], b.world[3]))
-			table.insert(p, bone.WorldPosition)
+			table.insert(p, frame:PointToObjectSpace(bone.WorldPosition))
 		end
 	end
 	if #g < 3 then
@@ -572,7 +583,8 @@ local function fitSpace(skeleton, bonesByName)
 			end
 		end
 	end
-	best.t = cp - best.R:VectorToWorldSpace(cg * best.s)
+	best.t = frame:PointToWorldSpace(cp - best.R:VectorToWorldSpace(cg * best.s))
+	best.R = frame.Rotation * best.R -- rig space -> world
 	return best
 end
 
@@ -1486,7 +1498,7 @@ end
 -- as JSON in bone space); the UmaChibiSmartBone runtime turns them into SmartBone settings, scaled to the rig's
 -- size at that moment, so the rig can be rescaled later.
 local SPRING_ATTRS = { "UmaSpringStiffness", "UmaSpringDrag", "UmaSpringGravity", "UmaSpringRadius", "UmaSpringLimit", "UmaSpringPart",
-	"UmaSpringCollideWith", "UmaSpringTail" }
+	"UmaSpringCollideWith", "UmaSpringTail", "UmaSpringAxisX", "UmaSpringAxisY", "UmaSpringLimitX", "UmaSpringLimitY" }
 
 local function importPhysics(model)
 	stampIdentity(model)
@@ -1521,6 +1533,12 @@ local function importPhysics(model)
 				if b.limit then -- cone angle: the widest of the x/y limits (z is twist)
 					local l = b.limit
 					bone:SetAttribute("UmaSpringLimit", math.max(l[1], l[2], l[4], l[5]))
+					if b.axes then -- the game's own per-axis limits: swing about the bone's x / y in [-min, +max]
+						bone:SetAttribute("UmaSpringAxisX", boneSpace(bone, b.axes[1]).Unit)
+						bone:SetAttribute("UmaSpringAxisY", boneSpace(bone, b.axes[2]).Unit)
+						bone:SetAttribute("UmaSpringLimitX", Vector2.new(l[1], l[4]))
+						bone:SetAttribute("UmaSpringLimitY", Vector2.new(l[2], l[5]))
+					end
 				end
 				if b.tail then -- offset to the chain's tip bone, which the rig does not have (GLB metres, bone space)
 					bone:SetAttribute("UmaSpringTail", boneSpace(bone, b.tail))
@@ -1618,6 +1636,7 @@ local GAME = {
 	gravity = 0.006, -- studs/s^2 per game gravity unit, per stud of rig per GLB metre (hair 300 -> ~3.3 on a 2-stud mini)
 	minLimit = 20, -- degrees: the game's limits are per axis around its own bone axes, this is one cone
 	colliders = true, -- the game's body colliders (head, chest, arms, hips, thighs, knees) push the chains out
+	swingLimits = true, -- the game's per-axis angle limits (min/max about each bone's own x and y)
 }
 
 local SmartBone = require(--[[SMARTBONE_PATH]])
@@ -1766,6 +1785,15 @@ local function applyGamePhysics(model, rp, roots)
 			setDefault(d, "Gravity", Vector3.new(0, -(d:GetAttribute("UmaSpringGravity") or 0) * GAME.gravity * s, 0))
 			local limit = d:GetAttribute("UmaSpringLimit")
 			setDefault(d, "RotationLimit", limit and math.clamp(limit, GAME.minLimit, 180) or 180)
+			-- the game's lopsided per-axis limits (read by the plugin's SmartBone patch): what stops a strand
+			-- tipping into the head, which one symmetric cone cannot
+			local lx, ly = d:GetAttribute("UmaSpringLimitX"), d:GetAttribute("UmaSpringLimitY")
+			if GAME.swingLimits and lx and ly and math.min(lx.X, lx.Y, ly.X, ly.Y) < 180 then
+				setDefault(d, "SwingAxisX", d:GetAttribute("UmaSpringAxisX"))
+				setDefault(d, "SwingAxisY", d:GetAttribute("UmaSpringAxisY"))
+				setDefault(d, "SwingLimitX", lx)
+				setDefault(d, "SwingLimitY", ly)
+			end
 		end
 	end
 	if any and GAME.colliders then
@@ -1978,6 +2006,69 @@ local SB_PATCHES = {
 			.. '\t\t\tif typeof(RestTail) == "Vector3" and RestTail.Magnitude > 1e-5 then\n'
 			.. "\t\t\t\tStart = Bone.WorldCFrame + Bone.WorldCFrame:VectorToWorldSpace(RestTail)\n"
 			.. "\t\t\tend",
+	},
+	{ -- the game's per-axis swing limits; SmartBone only has a symmetric cone, which it also never applies to the
+		-- first particle below a chain's anchored root (a single-bone bang has no limit at all)
+		path = { "Components", "Bone" },
+		find = "function Class:Constrain(BoneTree, ColliderObjects, Delta: number) -- Parallel safe",
+		replace = SB_MARK .. ": swing limits. A bone with SwingAxisX/Y (unit, its own space) and SwingLimitX/Y\n"
+			.. "-- (Vector2 min, max degrees) keeps each child's direction within [-min, +max] of its rest direction about\n"
+			.. "-- those axes, measured in the bone's current frame (animated, turned by its own swing).\n"
+			.. "local function UmaSwing(Bone)\n"
+			.. "\tif Bone.UmaSwing == nil then\n"
+			.. "\t\tBone.UmaSwing = false\n"
+			.. "\t\tlocal Object = Bone.Bone\n"
+			.. '\t\tlocal AX, AY = Object:GetAttribute("SwingAxisX"), Object:GetAttribute("SwingAxisY")\n'
+			.. '\t\tlocal LX, LY = Object:GetAttribute("SwingLimitX"), Object:GetAttribute("SwingLimitY")\n'
+			.. '\t\tif typeof(AX) == "Vector3" and typeof(AY) == "Vector3" and typeof(LX) == "Vector2" and typeof(LY) == "Vector2" then\n'
+			.. "\t\t\tBone.UmaSwing = { AX.Unit, AY.Unit, math.rad(LX.X), math.rad(LX.Y), math.rad(LY.X), math.rad(LY.Y) }\n"
+			.. "\t\tend\n"
+			.. "\tend\n"
+			.. "\treturn Bone.UmaSwing\n"
+			.. "end\n"
+			.. "\n"
+			.. "local function UmaSwingConstraint(self, Position, BoneTree)\n"
+			.. "\tlocal Parent = BoneTree.Bones[self.ParentIndex]\n"
+			.. "\tlocal Swing = Parent and self.RestAxis and UmaSwing(Parent)\n"
+			.. "\tif not Swing then\n"
+			.. "\t\treturn Position\n"
+			.. "\tend\n"
+			.. "\tlocal Frame = Parent.AnimatedWorldCFrame.Rotation\n"
+			.. "\tlocal Grand = BoneTree.Bones[Parent.ParentIndex]\n"
+			.. "\tif Grand and not Parent.Anchored then -- the parent's own swing turns the frame its limits are in\n"
+			.. "\t\tlocal RestDir = Parent.AnimatedWorldCFrame.Position - Grand.AnimatedWorldCFrame.Position\n"
+			.. "\t\tlocal NowDir = Parent.Position - Grand.Position\n"
+			.. "\t\tif RestDir.Magnitude > 1e-5 and NowDir.Magnitude > 1e-5 then\n"
+			.. "\t\t\tFrame = Utilities.GetRotationBetween(RestDir.Unit, NowDir.Unit).Rotation * Frame\n"
+			.. "\t\tend\n"
+			.. "\tend\n"
+			.. "\tlocal Offset = Position - Parent.Position\n"
+			.. "\tlocal Length = Offset.Magnitude\n"
+			.. "\tif Length < 1e-5 then\n"
+			.. "\t\treturn Position\n"
+			.. "\tend\n"
+			.. "\tlocal Rest = Frame:VectorToWorldSpace(self.RestAxis)\n"
+			.. "\tlocal Dir = Offset / Length\n"
+			.. "\tfor i = 1, 2 do\n"
+			.. "\t\tlocal Axis = Frame:VectorToWorldSpace(Swing[i])\n"
+			.. "\t\tlocal A = Rest - Axis * Axis:Dot(Rest)\n"
+			.. "\t\tlocal B = Dir - Axis * Axis:Dot(Dir)\n"
+			.. "\t\tlocal Angle = math.atan2(Axis:Dot(A:Cross(B)), A:Dot(B))\n"
+			.. "\t\tlocal Clamped = math.clamp(Angle, -Swing[2 * i + 1], Swing[2 * i + 2])\n"
+			.. "\t\tif Clamped ~= Angle then\n"
+			.. "\t\t\tDir = CFrame.fromAxisAngle(Axis, Clamped - Angle):VectorToWorldSpace(Dir)\n"
+			.. "\t\tend\n"
+			.. "\tend\n"
+			.. "\treturn Parent.Position + Dir * Length\n"
+			.. "end\n"
+			.. "\n"
+			.. "function Class:Constrain(BoneTree, ColliderObjects, Delta: number) -- Parallel safe",
+	},
+	{
+		path = { "Components", "Bone" },
+		find = "Position = RotationConstraint(self, Position, BoneTree)",
+		add = "\n\t" .. SB_MARK .. ": the game's per-axis swing limits\n"
+			.. "\tPosition = UmaSwingConstraint(self, Position, BoneTree)",
 	},
 	{
 		path = { "Components", "Bone" },

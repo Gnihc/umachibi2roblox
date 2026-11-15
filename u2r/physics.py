@@ -96,6 +96,15 @@ def convert_container(tt: dict, part: str, skel, ex, A: np.ndarray, gltf_names: 
         # The PMX export drops the unweighted tip bone of a chain, so the rig's last bone has no child to say
         # which way the strand hangs (a single-bone strand would be read as pointing up, away from the head).
         # The game skeleton still has that tip: store the offset to it (a GLB-space vector) as the bone's tail.
+        # The game's angle limits are per axis of the bone's own (Unity) frame: the bone points down its +Z, swings
+        # about x and y within [-min, +max] degrees (z is twist), and min/max differ (a bang may lift 30 degrees off
+        # the forehead but only tip 2 toward it). Store each limited bone's x and y axes as GLB-space unit vectors,
+        # the frame those signs are measured in.
+        for i, x in enumerate(elems):
+            bi = skel.by_name.get(x["_boneName"])
+            if bones[i]["limit"] and bi is not None:
+                O = ex.O[bi]
+                bones[i]["axes"] = [O[:, 0].round(5).tolist(), O[:, 1].round(5).tolist()]
         for i in range(len(elems) - 1):
             if in_rig[i] and not in_rig[i + 1]:
                 a, b = skel.by_name.get(elems[i]["_boneName"]), skel.by_name.get(elems[i + 1]["_boneName"])

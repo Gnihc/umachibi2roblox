@@ -82,6 +82,9 @@ def main():
     assert (b0["stiffness"], b0["drag"], b0["gravity"]) == (150, 900, 300)
     assert abs(b0["radius"] - 0.03 * k) < 1e-5 and abs(b1["radius"] - 0.05 * k) < 1e-5     # game units -> GLB metres
     assert b0["limit"] == [30, 15, 0, 30, 15, 0] and b1["limit"] is None
+    # a limited bone carries its swing axes (unit, GLB space); the test skeleton rests unrotated
+    assert np.allclose(np.abs(b0["axes"]), [[1, 0, 0], [0, 1, 0]], atol=1e-4), b0["axes"]
+    assert "axes" not in b1
     assert chains["Spine"]["part"] == "body"
     # the chain's tip bone is in the game skeleton but not in the rig: its offset is the last rig bone's tail
     A0 = np.array(json.load(open(r.meta, encoding="utf-8"))["unityToGltf"], float)
