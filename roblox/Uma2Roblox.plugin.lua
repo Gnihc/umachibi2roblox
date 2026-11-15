@@ -2847,6 +2847,8 @@ end)
 --   any other rig (NPC)   UmaAnimateServer (a Script: runs on the server)
 -- Its children:
 --   UmaAnimateClient, UmaAnimateServer: those two scripts (inert here, in ReplicatedStorage)
+--   UmaRagdoll (ModuleScript) + UmaRagdollClient (Script, RunContext Client: runs on every client): the ragdoll,
+--           switched by the rig's UmaRagdoll attribute
 --   _idle, _walk (and optionally _run, _jump, _fall, _climb, _sit, _swim): the universal base animations, one or more
 --           Animations each (several = picked at random by a Weight NumberValue/attribute). A rig's own UmaAnimate
 --           set of the same name (its idle) wins when uploaded. These are the user's own uploads.
@@ -2890,6 +2892,9 @@ local HANDLER_SOURCE = [===[
 --   /e Emote, /e Emote2   the rig's own emotes (UmaAnimate.Emote; "Emotes" from older plugins works too)
 -- An entry is an Animation (looped until the player moves), or a Folder/StringValue holding "Start" (played once)
 -- and/or "Loop" (then looped). Anything not found goes to the default Animate / catalog emotes.
+--
+-- RAGDOLL (UmaRagdoll, in this module): rig:SetAttribute("UmaRagdoll", true) on the server ragdolls the rig, false
+-- stands it up; a rig also ragdolls when it dies (this module's RagdollOnDeath attribute, default true).
 --
 -- SCRIPTING:
 --   Handler.Play(rig, "Dance3")   plays an emote on a rig this side animates (server: NPCs; client: own character)
@@ -3136,6 +3141,9 @@ end
 
 -- plays a base set (idle, walk, ...); nothing changes when one of its animations is already playing
 function Controller:play(name, fade, reroll)
+	if self.ragdoll then
+		return
+	end
 	local resolved, list, total, set = self:resolve(name)
 	if not resolved then
 		if self.track and not self.emoting then
@@ -3182,7 +3190,7 @@ function Controller:fitSpeed(speed)
 end
 
 function Controller:emote(name)
-	if self.pose == "Dead" or (self.humanoid and self.pose ~= "Standing") then
+	if self.ragdoll or self.pose == "Dead" or (self.humanoid and self.pose ~= "Standing") then
 		return false
 	end
 	local e = findEmote(self.rig, name)
@@ -3239,6 +3247,9 @@ function Controller:onRunning(speed)
 end
 
 function Controller:step(dt)
+	if self.ragdoll then
+		return
+	end
 	if self.jumpTime > 0 then
 		self.jumpTime -= dt
 	end
@@ -3272,6 +3283,31 @@ function Controller:silence(inst)
 	if inst.Name == "Animate" and inst:IsA("BaseScript") and inst.Enabled then
 		inst.Enabled = false -- the default (or an old) Animate would fight over the same tracks
 		task.delay(0.2, self.sweep, self)
+	end
+end
+
+-- UmaRagdoll: no animation while the rig lies; the server builds the ragdoll (UmaRagdoll module)
+function Controller:setRagdoll(on)
+	if on == (self.ragdoll == true) then
+		return
+	end
+	local hum = self.humanoid
+	if on then
+		self:stopCurrent(0.1)
+		self.ragdoll = true
+		for _, t in ipairs(self.animator:GetPlayingAnimationTracks()) do
+			t:Stop(0.1)
+		end
+		if hum and hum.Health > 0 then
+			hum:ChangeState(Enum.HumanoidStateType.Physics)
+		end
+	else
+		self.ragdoll = false
+		if hum and hum.Health > 0 then
+			hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end
+		self.pose = "Standing"
+		self:play("idle", FADE)
 	end
 end
 
@@ -3344,7 +3380,13 @@ function Controller.new(rig)
 			self:emote(name)
 		end
 	end)
+	on(rig:GetAttributeChangedSignal("UmaRagdoll"), function()
+		self:setRagdoll(rig:GetAttribute("UmaRagdoll") == true)
+	end)
 	self:play("idle", FADE)
+	if rig:GetAttribute("UmaRagdoll") == true then
+		self:setRagdoll(true)
+	end
 	task.spawn(function()
 		while self.alive do
 			self:step(task.wait(0.1))
@@ -3391,6 +3433,39 @@ local function checkOwnIdle(rig)
 end
 
 -- server: gives the rig the script for its owner (Players:GetPlayerFromCharacter), and takes the other one away
+-- server: the UmaRagdoll attribute builds / removes the ragdoll; a death ragdolls (RagdollOnDeath, default on)
+local ragdollHooked = setmetatable({}, { __mode = "k" })
+local function hookRagdoll(rig)
+	if ragdollHooked[rig] then
+		return
+	end
+	local module = script:FindFirstChild("UmaRagdoll")
+	local ok, Ragdoll = pcall(require, module)
+	if not (ok and type(Ragdoll) == "table") then
+		note("ragdoll", script:GetFullName() .. " has no UmaRagdoll module; click 'Add UmaAnimateHandler to this place' in the Uma2Roblox plugin again.")
+		return
+	end
+	ragdollHooked[rig] = true
+	local function apply()
+		local fine, err = pcall(rig:GetAttribute("UmaRagdoll") == true and Ragdoll.Build or Ragdoll.Remove, rig)
+		if not fine then
+			warn("[UmaAnimateHandler] ragdoll " .. rig:GetFullName() .. ": " .. tostring(err))
+		end
+	end
+	rig:GetAttributeChangedSignal("UmaRagdoll"):Connect(apply)
+	local hum = rig:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.Died:Connect(function()
+			if script:GetAttribute("RagdollOnDeath") ~= false then
+				rig:SetAttribute("UmaRagdoll", true)
+			end
+		end)
+	end
+	if rig:GetAttribute("UmaRagdoll") == true then
+		apply()
+	end
+end
+
 local assign
 assign = function(rig)
 	if not rig:IsDescendantOf(workspace) then
@@ -3413,6 +3488,7 @@ assign = function(rig)
 	end
 	if want then
 		checkOwnIdle(rig)
+		hookRagdoll(rig)
 	end
 	if not want or rig:FindFirstChild(want) then
 		return
@@ -3632,6 +3708,366 @@ local HANDLER_CLIENT_SOURCE = [===[
 require(game:GetService("ReplicatedStorage"):WaitForChild("UmaAnimateHandler")).Animate(script.Parent, script)
 ]===]
 
+local RAGDOLL_NAME = "UmaRagdoll"
+local RAGDOLL_CLIENT = "UmaRagdollClient"
+local RAGDOLL_SOURCE = [===[
+-- UmaRagdoll (Uma2Roblox, part of UmaAnimateHandler): a ragdoll for Uma rigs, switched by an attribute.
+--
+--   rig:SetAttribute("UmaRagdoll", true)    ragdoll (set it on the server)
+--   rig:SetAttribute("UmaRagdoll", false)   stand up again
+--   UmaAnimateHandler's RagdollOnDeath attribute (default true): a rig ragdolls when its Humanoid dies
+--
+-- Uma rigs move by bones, which physics does not move. The server builds invisible parts for the body (torso,
+-- head, upper/lower arms and legs) in the rig's current pose, joined by BallSocketConstraints, with the
+-- HumanoidRootPart welded to the torso; every client (UmaRagdollClient, in UmaAnimateHandler) then turns the body
+-- bones to follow those parts each frame. Hair, skirt and the rest follow their body bones as usual.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
+
+local Ragdoll = {}
+
+local FOLDER = "UmaRagdoll"
+local TAG = "UmaRagdolled"
+local PREFIX = "UmaBone_" -- a part's attribute: the bone it carries -> that bone's offset from the part
+
+-- each body part: the bones it carries; the segment it spans (from -> to, stretched by extend); the bone where it
+-- joins its parent part, with the cone (degrees off its pose when ragdolled) and twist limits
+local SEGMENTS = {
+	{ name = "Torso", bones = { "Hip", "Waist", "Chest", "Neck", "Shoulder_L", "Shoulder_R" }, from = "Hip", to = "Neck" },
+	{ name = "Head", bones = { "Head" }, joint = "Head", parent = "Torso", limit = 35, twist = 30 },
+	{ name = "UpperArm_L", bones = { "Arm_L" }, from = "Arm_L", to = "Elbow_L", joint = "Arm_L", parent = "Torso", limit = 85, twist = 45 },
+	{ name = "LowerArm_L", bones = { "Elbow_L" }, from = "Elbow_L", to = "Wrist_L", extend = 1.3, joint = "Elbow_L", parent = "UpperArm_L", limit = 70, twist = 10 },
+	{ name = "UpperArm_R", bones = { "Arm_R" }, from = "Arm_R", to = "Elbow_R", joint = "Arm_R", parent = "Torso", limit = 85, twist = 45 },
+	{ name = "LowerArm_R", bones = { "Elbow_R" }, from = "Elbow_R", to = "Wrist_R", extend = 1.3, joint = "Elbow_R", parent = "UpperArm_R", limit = 70, twist = 10 },
+	{ name = "UpperLeg_L", bones = { "Thigh_L" }, from = "Thigh_L", to = "Knee_L", joint = "Thigh_L", parent = "Torso", limit = 60, twist = 20 },
+	{ name = "LowerLeg_L", bones = { "Knee_L" }, from = "Knee_L", to = "Ankle_L", extend = 1.25, joint = "Knee_L", parent = "UpperLeg_L", limit = 70, twist = 5 },
+	{ name = "UpperLeg_R", bones = { "Thigh_R" }, from = "Thigh_R", to = "Knee_R", joint = "Thigh_R", parent = "Torso", limit = 60, twist = 20 },
+	{ name = "LowerLeg_R", bones = { "Knee_R" }, from = "Knee_R", to = "Ankle_R", extend = 1.25, joint = "Knee_R", parent = "UpperLeg_R", limit = 70, twist = 5 },
+}
+
+local function rootOf(rig)
+	return rig:FindFirstChild("HumanoidRootPart") or rig.PrimaryPart
+end
+
+-- the rig's bones by name (the first of each name)
+local function boneMap(rig)
+	local map = {}
+	for _, d in ipairs(rig:GetDescendants()) do
+		if d:IsA("Bone") and not map[d.Name] then
+			map[d.Name] = d
+		end
+	end
+	return map
+end
+
+-- a CFrame at the middle of a -> b, its Y axis along the segment, X toward the rig's right
+local function segmentFrame(a, b, root)
+	local y = (b - a).Unit
+	local x = root.CFrame.RightVector
+	if math.abs(x:Dot(y)) > 0.95 then
+		x = root.CFrame.LookVector
+	end
+	local z = x:Cross(y).Unit
+	x = y:Cross(z).Unit
+	return CFrame.fromMatrix((a + b) / 2, x, y, z)
+end
+
+-- the face mesh (its bounds stand for the head), if any
+local function faceMesh(rig)
+	local best
+	for _, p in ipairs(rig:GetDescendants()) do
+		if p:IsA("MeshPart") and string.find(string.lower(p.Name), "face", 1, true) and not string.find(p.Name, "^Face_") then
+			if not best or p.Size.Magnitude > best.Size.Magnitude then
+				best = p
+			end
+		end
+	end
+	return best
+end
+
+-- server: builds the ragdoll in the rig's current pose. true when it is ragdolled.
+function Ragdoll.Build(rig)
+	if rig:FindFirstChild(FOLDER) then
+		return true
+	end
+	local root = rootOf(rig)
+	local bones = boneMap(rig)
+	if not (root and bones.Hip and bones.Chest) then
+		return false
+	end
+	local function at(name)
+		local b = bones[name]
+		return b and b.TransformedWorldCFrame.Position
+	end
+	local folder = Instance.new("Folder")
+	folder.Name = FOLDER
+	local parts = {}
+	local shoulders = (at("Arm_L") and at("Arm_R")) and (at("Arm_L") - at("Arm_R")).Magnitude or 2
+
+	local function newPart(name, cf, size, shape)
+		local p = Instance.new("Part")
+		p.Name = name
+		p.Shape = shape or Enum.PartType.Block
+		p.Size = size
+		p.CFrame = cf
+		p.Transparency = 1
+		p.CanCollide = true
+		p.CanTouch = false
+		p.CanQuery = false
+		p.CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.8, 0, 1, 1)
+		p.Parent = folder
+		parts[name] = p
+		return p
+	end
+
+	for _, s in ipairs(SEGMENTS) do
+		local parent = s.parent and parts[s.parent]
+		local part
+		if s.name == "Head" then
+			local head = at("Head")
+			if head then
+				local face = faceMesh(rig)
+				local size = face and math.min(face.Size.X, face.Size.Y, face.Size.Z) * 0.85
+					or (at("Neck") and (head - at("Neck")).Magnitude * 6) or shoulders * 1.5
+				local center = face and face.Position or (head + root.CFrame.UpVector * size / 2)
+				part = newPart("Head", CFrame.new(center) * root.CFrame.Rotation, Vector3.one * size, Enum.PartType.Ball)
+			end
+		elseif at(s.from) and (at(s.to) or (s.to == "Neck" and at("Chest"))) then
+			local a, b = at(s.from), at(s.to) or at("Chest")
+			b = a + (b - a) * (s.extend or 1)
+			local length = (b - a).Magnitude
+			local size
+			if s.name == "Torso" then
+				size = Vector3.new(shoulders * 0.9, length * 1.15, shoulders * 0.55)
+			else
+				local w = math.max(length * 0.45, shoulders * 0.15)
+				size = Vector3.new(w, length, w)
+			end
+			part = newPart(s.name, segmentFrame(a, b, root), size)
+		end
+		if part then
+			for _, name in ipairs(s.bones) do
+				local b = bones[name]
+				if b then
+					part:SetAttribute(PREFIX .. name, part.CFrame:ToObjectSpace(b.TransformedWorldCFrame))
+				end
+			end
+			if parent and at(s.joint) then
+				-- the joint's primary axis along the child (the head: from the joint to its centre)
+				local p = at(s.joint)
+				local axis = s.name == "Head" and (part.Position - p) or part.CFrame.UpVector
+				axis = axis.Magnitude > 1e-4 and axis.Unit or root.CFrame.UpVector
+				local side = math.abs(axis:Dot(root.CFrame.LookVector)) < 0.95 and root.CFrame.LookVector or root.CFrame.RightVector
+				local up = side:Cross(axis).Unit
+				local cf = CFrame.fromMatrix(p, axis, up)
+				local a0, a1 = Instance.new("Attachment"), Instance.new("Attachment")
+				a0.Name, a1.Name = "Ragdoll_" .. s.name, "Ragdoll_" .. s.name
+				a0.Parent, a1.Parent = parent, part
+				a0.WorldCFrame, a1.WorldCFrame = cf, cf
+				local joint = Instance.new("BallSocketConstraint")
+				joint.Name = "Joint"
+				joint.Attachment0, joint.Attachment1 = a0, a1
+				joint.LimitsEnabled = true
+				joint.UpperAngle = s.limit
+				joint.TwistLimitsEnabled = true
+				joint.TwistLowerAngle, joint.TwistUpperAngle = -s.twist, s.twist
+				joint.Restitution = 0
+				joint.Parent = part
+			end
+		end
+	end
+	if not parts.Torso then
+		folder:Destroy()
+		return false
+	end
+	-- the body does not collide with itself (the chibi head overlaps the shoulders), only with the world
+	local list = {}
+	for _, p in pairs(parts) do
+		table.insert(list, p)
+	end
+	for i = 1, #list do
+		for j = i + 1, #list do
+			local nc = Instance.new("NoCollisionConstraint")
+			nc.Part0, nc.Part1 = list[i], list[j]
+			nc.Parent = list[i]
+		end
+	end
+	-- the root rides on the torso; restored when it stands up
+	folder:SetAttribute("RootCanCollide", root.CanCollide)
+	folder:SetAttribute("RootMassless", root.Massless)
+	folder:SetAttribute("HipLocal", root.CFrame:PointToObjectSpace(at("Hip")))
+	folder:SetAttribute("LookLocal", parts.Torso.CFrame:VectorToObjectSpace(root.CFrame.LookVector))
+	root.CanCollide = false
+	root.Massless = true
+	parts.Torso.RootPriority = 1
+	local weld = Instance.new("WeldConstraint")
+	weld.Name = "RootWeld"
+	weld.Part0, weld.Part1 = parts.Torso, root
+	weld.Parent = parts.Torso
+	local velocity = root.AssemblyLinearVelocity
+	folder.Parent = rig
+	local owner = Players:GetPlayerFromCharacter(rig)
+	for _, p in pairs(parts) do
+		p.AssemblyLinearVelocity = velocity
+		pcall(p.SetNetworkOwner, p, owner) -- the player simulates their own; the server an NPC
+	end
+	local hum = rig:FindFirstChildOfClass("Humanoid")
+	if hum and not owner and hum.Health > 0 then
+		hum:ChangeState(Enum.HumanoidStateType.Physics)
+	end
+	CollectionService:AddTag(rig, TAG)
+	return true
+end
+
+-- server: removes the ragdoll and stands the root up where the hips lie
+function Ragdoll.Remove(rig)
+	local folder = rig:FindFirstChild(FOLDER)
+	if not folder then
+		return
+	end
+	CollectionService:RemoveTag(rig, TAG)
+	local root = rootOf(rig)
+	local torso = folder:FindFirstChild("Torso")
+	local hipOffset = torso and torso:GetAttribute(PREFIX .. "Hip")
+	local hipLocal, lookLocal = folder:GetAttribute("HipLocal"), folder:GetAttribute("LookLocal")
+	local hip = hipOffset and (torso.CFrame * hipOffset).Position
+	local look = torso and lookLocal and torso.CFrame:VectorToWorldSpace(lookLocal)
+	local canCollide, massless = folder:GetAttribute("RootCanCollide"), folder:GetAttribute("RootMassless")
+	folder:Destroy()
+	if not root then
+		return
+	end
+	root.CanCollide = canCollide ~= false
+	root.Massless = massless == true
+	if hip and hipLocal then
+		local flat = look and Vector3.new(look.X, 0, look.Z) or Vector3.zero
+		if flat.Magnitude < 1e-3 then
+			flat = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+		end
+		local turn = CFrame.lookAt(Vector3.zero, flat.Magnitude > 1e-3 and flat.Unit or Vector3.zAxis)
+		root.CFrame = turn + (hip - turn:VectorToWorldSpace(hipLocal) + Vector3.new(0, 0.5, 0))
+	end
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	if not Players:GetPlayerFromCharacter(rig) then
+		pcall(root.SetNetworkOwnershipAuto, root)
+	end
+end
+
+---------------------------------------------------------------- every client: the bones follow the parts
+
+-- the body bones the parts carry, and every bone between them and the root, parent first
+local function rigState(rig)
+	local root = rootOf(rig)
+	local folder = rig:WaitForChild(FOLDER, 5)
+	if not (root and folder) then
+		return nil
+	end
+	local bones = boneMap(rig)
+	local driven, needed = {}, {}
+	for _, part in ipairs(folder:GetChildren()) do
+		if part:IsA("BasePart") then
+			for key, offset in pairs(part:GetAttributes()) do
+				local b = string.sub(key, 1, #PREFIX) == PREFIX and bones[string.sub(key, #PREFIX + 1)]
+				if b and typeof(offset) == "CFrame" then
+					driven[b] = { part = part, offset = offset }
+					local a = b
+					while a and a:IsA("Bone") do
+						needed[a] = true
+						a = a.Parent
+					end
+				end
+			end
+		end
+	end
+	local chain = {}
+	local function visit(inst)
+		for _, c in ipairs(inst:GetChildren()) do
+			if c:IsA("Bone") and needed[c] then
+				table.insert(chain, c)
+				visit(c)
+			end
+		end
+	end
+	visit(root)
+	if #chain == 0 then
+		return nil
+	end
+	return { root = root, chain = chain, driven = driven }
+end
+
+local function drive(st)
+	local world = {}
+	for _, b in ipairs(st.chain) do
+		local parent = b.Parent
+		local parentWorld = world[parent] or (parent:IsA("BasePart") and parent.CFrame) or parent.TransformedWorldCFrame
+		local d = st.driven[b]
+		if d and d.part.Parent then
+			local target = d.part.CFrame * d.offset
+			b.Transform = (parentWorld * b.CFrame):Inverse() * target
+			world[b] = target
+		else
+			b.Transform = CFrame.identity
+			world[b] = parentWorld * b.CFrame
+		end
+	end
+end
+
+function Ragdoll.StartClient()
+	local active = {}
+	local function add(rig)
+		if active[rig] ~= nil then
+			return
+		end
+		active[rig] = false
+		task.spawn(function()
+			local st = rigState(rig)
+			if active[rig] == false and st and CollectionService:HasTag(rig, TAG) then
+				active[rig] = st
+			elseif active[rig] == false then
+				active[rig] = nil
+			end
+		end)
+	end
+	local function remove(rig)
+		local st = active[rig]
+		active[rig] = nil
+		if st then
+			for _, b in ipairs(st.chain) do
+				b.Transform = CFrame.identity -- the Animator takes over again
+			end
+		end
+	end
+	CollectionService:GetInstanceAddedSignal(TAG):Connect(add)
+	CollectionService:GetInstanceRemovedSignal(TAG):Connect(remove)
+	for _, rig in ipairs(CollectionService:GetTagged(TAG)) do
+		add(rig)
+	end
+	-- after the simulation, so the bones show where the parts landed this frame (and win over the Animator)
+	RunService.PostSimulation:Connect(function()
+		for rig, st in pairs(active) do
+			if st then
+				if rig.Parent then
+					drive(st)
+				else
+					active[rig] = nil
+				end
+			end
+		end
+	end)
+end
+
+return Ragdoll
+]===]
+
+local RAGDOLL_CLIENT_SOURCE = [===[
+-- Uma2Roblox: on every client, turns the bones of ragdolled Uma rigs to follow their ragdoll parts. Runs here, in
+-- UmaAnimateHandler (RunContext Client). See UmaRagdoll.
+require(script.Parent:WaitForChild("UmaRagdoll")).StartClient()
+]===]
+
 local HANDLER_BASE = {
 	{ folder = "_idle", anim = "Idle", hint = "Optional: a universal IDLE for rigs without an uploaded idle of their own (UmaAnimate.idle, which always wins). Paste an AnimationId into Idle (or add more Animations; Weight = how often)." },
 	{ folder = "_walk", anim = "Walk", required = true, hint = "Your own uploaded WALK animation(s): paste the AnimationId into Walk. Optional SpeedAt1x attribute = speed (studs/s) the clip is made for. Add _run, _jump, _fall, _climb, _sit, _swim the same way." },
@@ -3649,14 +4085,17 @@ local function hasPlayable(set)
 end
 
 -- replaced rather than edited, as the other runtimes (a new Source did not always reach playtests); keeps children
-local function putScript(className, parent, name, source)
+local function putScript(className, parent, name, source, runContext)
 	local old = parent:FindFirstChild(name)
-	if old and old.ClassName == className and old.Source == source then
+	if old and old.ClassName == className and old.Source == source and (not runContext or old.RunContext == runContext) then
 		return "current", old
 	end
 	local s = Instance.new(className)
 	s.Name = name
 	s.Source = source
+	if runContext then
+		s.RunContext = runContext
+	end
 	if old then
 		for _, c in ipairs(old:GetChildren()) do
 			c.Parent = s
@@ -3784,6 +4223,11 @@ local function installAnimateHandler()
 	-- the per-rig scripts live in the handler; the server caller copies them into the rigs
 	putScript("LocalScript", handler, HANDLER_CLIENT, HANDLER_CLIENT_SOURCE)
 	putScript("Script", handler, HANDLER_SERVER, HANDLER_SERVER_SOURCE)
+	putScript("ModuleScript", handler, RAGDOLL_NAME, RAGDOLL_SOURCE)
+	putScript("Script", handler, RAGDOLL_CLIENT, RAGDOLL_CLIENT_SOURCE, Enum.RunContext.Client)
+	if handler:GetAttribute("RagdollOnDeath") == nil then
+		handler:SetAttribute("RagdollOnDeath", true)
+	end
 	local sss = game:GetService("ServerScriptService")
 	local sps = game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts")
 	for _, pair in ipairs({ { sss, HANDLER_SERVER }, { sps, HANDLER_CLIENT } }) do
@@ -3831,6 +4275,8 @@ local function installAnimateHandler()
 		warn("[Uma2Roblox] " .. msg)
 	end
 	table.insert(lines, "/e commands: every other Folder in " .. HANDLER_NAME .. " (/e Dance, /e Dance3, /e Umapyoi2); /e Emote = the rig's own UmaAnimate.Emote.")
+	table.insert(lines, "Ragdoll: rig:SetAttribute(\"UmaRagdoll\", true / false) on the server; dying ragdolls too ("
+		.. HANDLER_NAME .. ".RagdollOnDeath).")
 	return table.concat(lines, "\n")
 end
 

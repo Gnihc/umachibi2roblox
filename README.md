@@ -182,6 +182,12 @@ handler, and the script goes to `ServerStorage`, disabled.
   is an Animation (looped until the player moves) or a Folder with `Start` (played once) and/or `Loop`.
 * **A rig's own commands** are the Folders in its `UmaAnimate`, tried first: the plugin makes `Emote`
   (`/e Emote<n>`, `/e Emote` = a random one). The install renames `Emotes` from older imports to `Emote`.
+* **Ragdoll** (`UmaRagdoll` and `UmaRagdollClient`, inside the handler): set `rig:SetAttribute("UmaRagdoll",
+  true)` on the server to ragdoll a rig, `false` to stand it up where it lies. A rig also ragdolls when it dies
+  (the handler's `RagdollOnDeath` attribute, on by default). Bones are not moved by physics, so the server
+  builds invisible parts (torso, head, upper and lower arms and legs) joined by ball sockets in the rig's
+  current pose. The rig's owner simulates them (a player their character, the server an NPC), and every
+  client turns the body bones to follow them. Animation pauses meanwhile.
 * Scripts: `UmaAnimateHandler.Play(rig, "Dance3")`, `.Stop(rig)`, or `rig:SetAttribute("UmaEmote", "Dance3")`
   from anywhere. `UmaAnimateDisabled = true` on a rig leaves it alone.
 6. Click **Sync with Uma2Roblox app** (allow the localhost request the first time). Those characters
